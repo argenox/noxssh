@@ -1,0 +1,173 @@
+name: Release on tag
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release (e.g., v0.1.22)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  validate-tag:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+    outputs:
+      noxssh_version: ${{ steps.verify.outputs.noxssh_version }}
+      release_tag: ${{ steps.verify.outputs.release_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+
+      - name: Verify tag version and branch ancestry
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch origin "+refs/heads/*:refs/remotes/origin/*"
+
+          HEADER_VERSION="$(python - <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          header = pathlib.Path("client/version.h").read_text(encoding="utf-8")
+          m = re.search(r'NOXSSH_VERSION_STRING\s+"([^"]+)"', header)
+          if not m:
+              sys.exit("Could not find NOXSSH_VERSION_STRING")
+          print(m.group(1))
+          PY
+          )"
+
+          TAG_NAME="${RELEASE_TAG}"
+          if [[ -z "${TAG_NAME}" ]]; then
+            echo "No release tag was provided."
+            exit 1
+          fi
+          if [[ "${TAG_NAME}" != v* ]]; then
+            echo "Tag ${TAG_NAME} must start with 'v'."
+            exit 1
+          fi
+          TAG_VERSION="${TAG_NAME#v}"
+
+          if [[ "${TAG_VERSION}" != "${HEADER_VERSION}" ]]; then
+            echo "Tag ${TAG_NAME} does not match NOXSSH_VERSION_STRING ${HEADER_VERSION}"
+            exit 1
+          fi
+
+          TAG_SHA="$(git rev-list -n 1 "${TAG_NAME}")"
+          if ! git branch -r --contains "${TAG_SHA}" | grep -Eq 'origin/(master|main)$'; then
+            echo "Tagged commit is not on origin/master or origin/main."
+            exit 1
+          fi
+
+          echo "noxssh_version=${HEADER_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "release_tag=${TAG_NAME}" >> "${GITHUB_OUTPUT}"
+
+  build-release-assets:
+    needs: validate-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_suffix: linux-x64
+            archive_ext: tar.gz
+          - os: macos-latest
+            artifact_suffix: macos-arm64
+            archive_ext: tar.gz
+          - os: windows-latest
+            artifact_suffix: windows-x64
+            archive_ext: zip
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.validate-tag.outputs.release_tag }}
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Configure and build (Linux/macOS)
+        if: ${{ matrix.os != 'windows-latest' }}
+        shell: bash
+        run: |
+          cmake -S . -B build -D CMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+
+      - name: Configure and build (Windows)
+        if: ${{ matrix.os == 'windows-latest' }}
+        shell: pwsh
+        run: |
+          cmake -S . -B build
+          cmake --build build --config Release --parallel
+
+      - name: Create release archives (Linux/macOS)
+        if: ${{ matrix.os != 'windows-latest' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.validate-tag.outputs.noxssh_version }}"
+          mkdir -p release-assets
+          mkdir -p package
+          cp -a bin/. package/
+          cp README.md LICENSE.md COPYING.md package/
+          tar -C package -czf "release-assets/noxssh-${{ matrix.artifact_suffix }}-v${VERSION}.tar.gz" .
+
+      - name: Create release archives (Windows)
+        if: ${{ matrix.os == 'windows-latest' }}
+        shell: powershell
+        run: |
+          $version = "${{ needs.validate-tag.outputs.noxssh_version }}"
+          New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
+          New-Item -ItemType Directory -Force -Path "package" | Out-Null
+          Copy-Item -Recurse -Force "bin\*" "package\"
+          Copy-Item -Force "README.md","LICENSE.md","COPYING.md" "package\"
+          Compress-Archive -Path "package\*" -DestinationPath "release-assets\noxssh-${{ matrix.artifact_suffix }}-v$version.zip" -Force
+
+      - name: Upload release assets artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.artifact_suffix }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish-release:
+    needs: [validate-tag, build-release-assets]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate-tag.outputs.release_tag }}
+          name: NoxSSH v${{ needs.validate-tag.outputs.noxssh_version }}
+          generate_release_notes: true
+          files: release-assets/*
+          fail_on_unmatched_files: true
+          overwrite_files: true
