@@ -127,6 +127,13 @@ jobs:
             cp "${deb}" "release-assets/noxssh-${{ matrix.artifact_suffix }}-v${VERSION}.deb"
           done
 
+      - name: Verify client and daemon binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f bin/noxssh
+          test -f bin/noxsshd || test -f bin/noxsshd.exe
+
       - name: Create release archives
         shell: bash
         run: |
