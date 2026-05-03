@@ -1,5 +1,9 @@
 # NoxSSH
 
+[![Build](https://github.com/argenox/noxssh/actions/workflows/build-applications.yml/badge.svg)](https://github.com/argenox/noxssh/actions/workflows/build-applications.yml)
+[![Tests](https://github.com/argenox/noxssh/actions/workflows/tests.yml/badge.svg)](https://github.com/argenox/noxssh/actions/workflows/tests.yml)
+[![CodeQL](https://github.com/argenox/noxssh/actions/workflows/codeql.yml/badge.svg)](https://github.com/argenox/noxssh/actions/workflows/codeql.yml)
+
 **NoxSSH** is a lightweight SSH client built on a standalone SSH common protocol layer and NoxTLS cryptographic primitives. It provides a simple CLI for connecting to SSH servers, with password authentication and support for both interactive sessions and one-shot remote command execution.
 
 | | |

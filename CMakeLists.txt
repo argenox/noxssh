@@ -52,4 +52,10 @@ target_link_libraries(netnox_ssh
         noxtls_drbg
         noxtls_common
 )
+# Ensure AES-CTR API prototypes are visible when building the SSH layer.
+target_compile_definitions(netnox_ssh
+    PRIVATE
+        NOXTLS_FEATURE_AES=1
+        NOXTLS_FEATURE_AES_CTR=1
+)
 add_subdirectory(client)
