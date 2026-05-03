@@ -1,0 +1,30 @@
+# Build outputs
+/bin/
+/build/
+/out/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+Testing/
+
+# IDE/editor
+.vs/
+.vscode/
+*.user
+*.suo
+*.VC.db
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
