@@ -58,6 +58,21 @@ typedef struct netnox_interface_s netnox_interface_t;
 #define NETNOX_SSH_DEFAULT_PORT (22u)
 /** @brief Default SSH client identification string. */
 #define NETNOX_SSH_DEFAULT_CLIENT_IDENT "SSH-2.0-noxssh_0.1"
+/** @brief Default SSH server identification string. */
+#define NETNOX_SSH_DEFAULT_SERVER_IDENT "SSH-2.0-noxsshd_0.1"
+
+/** @brief SSH message number for disconnect. */
+#define NETNOX_SSH_MSG_DISCONNECT (1u)
+/** @brief SSH message number for ignore. */
+#define NETNOX_SSH_MSG_IGNORE (2u)
+/** @brief SSH message number for ext-info (RFC 8308). */
+#define NETNOX_SSH_MSG_EXT_INFO (7u)
+/** @brief SSH message number for global request. */
+#define NETNOX_SSH_MSG_GLOBAL_REQUEST (80u)
+/** @brief SSH message number for request success (global). */
+#define NETNOX_SSH_MSG_REQUEST_SUCCESS (81u)
+/** @brief SSH message number for request failure (global). */
+#define NETNOX_SSH_MSG_REQUEST_FAILURE (82u)
 
 /** @brief SSH message number for service request. */
 #define NETNOX_SSH_MSG_SERVICE_REQUEST (5u)
@@ -83,6 +98,8 @@ typedef struct netnox_interface_s netnox_interface_t;
 #define NETNOX_SSH_MSG_CHANNEL_OPEN_CONFIRMATION (91u)
 /** @brief SSH message number for channel open failure. */
 #define NETNOX_SSH_MSG_CHANNEL_OPEN_FAILURE (92u)
+/** @brief SSH message number for channel window adjust. */
+#define NETNOX_SSH_MSG_CHANNEL_WINDOW_ADJUST (93u)
 /** @brief SSH message number for channel data. */
 #define NETNOX_SSH_MSG_CHANNEL_DATA (94u)
 /** @brief SSH message number for channel extended data (stderr). */
@@ -110,6 +127,10 @@ typedef struct netnox_interface_s netnox_interface_t;
 #define NETNOX_SSH_CHANNEL_REQ_EXEC "exec"
 /** @brief Channel request type for shell. */
 #define NETNOX_SSH_CHANNEL_REQ_SHELL "shell"
+/** @brief Channel request type for subsystem (e.g. SFTP). */
+#define NETNOX_SSH_CHANNEL_REQ_SUBSYSTEM "subsystem"
+/** @brief SFTP subsystem name (RFC draft / de-facto standard). */
+#define NETNOX_SSH_SUBSYSTEM_SFTP "sftp"
 
 /** Callback to send data over the transport (socket/stream). Returns bytes sent or negative on error. */
 typedef int32_t (*netnox_ssh_transport_send_t)(void * user_data, const uint8_t * data, uint32_t len);
@@ -134,6 +155,7 @@ typedef struct
     uint8_t connected;
     uint8_t kexinit_exchanged;
     uint8_t userauth_service_ready;
+    uint8_t connection_service_ready;
     uint8_t authenticated;
     uint8_t channel_open;
     uint8_t key_exchange_complete;

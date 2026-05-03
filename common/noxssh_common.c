@@ -1761,6 +1761,51 @@ static netnox_return_t netnox_ssh_negotiate_userauth_service(netnox_ssh_client_t
 }
 
 /**
+ * @brief Perform service request/accept for ssh-connection (RFC 4254).
+ * @internal
+ */
+static netnox_return_t netnox_ssh_negotiate_connection_service(netnox_ssh_client_t * client)
+{
+    uint8_t payload[256];
+    uint32_t payload_len = 0u;
+    uint32_t offset = 1u;
+    const uint8_t * svc = NULL;
+    uint32_t svc_len = 0u;
+
+    if(client == NULL) {
+        return NETNOX_RETURN_BAD_PARAM;
+    }
+    SSH_DEBUG("negotiate_connection: sending service request ssh-connection");
+    if(netnox_ssh_send_service_request(client, NETNOX_SSH_SERVICE_CONNECTION) != NETNOX_RETURN_SUCCESS) {
+        SSH_DEBUG("negotiate_connection: send_service_request failed");
+        return NETNOX_RETURN_FAILED;
+    }
+    if(netnox_ssh_wait_for_message(client,
+                                   NETNOX_SSH_MSG_SERVICE_ACCEPT,
+                                   0xFFu,
+                                   payload,
+                                   (uint32_t)sizeof(payload),
+                                   &payload_len) != NETNOX_RETURN_SUCCESS) {
+        SSH_DEBUG("negotiate_connection: wait_for_message SERVICE_ACCEPT failed");
+        return NETNOX_RETURN_FAILED;
+    }
+    if(payload[0] != NETNOX_SSH_MSG_SERVICE_ACCEPT) {
+        SSH_DEBUG("negotiate_connection: unexpected message %u", (unsigned)payload[0]);
+        return NETNOX_RETURN_FAILED;
+    }
+    if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &svc, &svc_len) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(svc_len != strlen(NETNOX_SSH_SERVICE_CONNECTION) ||
+       memcmp(svc, NETNOX_SSH_SERVICE_CONNECTION, svc_len) != 0) {
+        return NETNOX_RETURN_FAILED;
+    }
+
+    client->connection_service_ready = 1u;
+    return NETNOX_RETURN_SUCCESS;
+}
+
+/**
  * @brief Send password-based userauth request.
  * @internal
  */
@@ -2027,6 +2072,15 @@ netnox_return_t netnox_ssh_client_open_session(netnox_ssh_client_t * client)
     }
     client->local_channel_id = 0u;
     client->local_window_size = NETNOX_SSH_CHANNEL_WINDOW_SIZE;
+
+    if(client->connection_service_ready == 0u) {
+        SSH_DEBUG("open_session: requesting ssh-connection service");
+        if(netnox_ssh_negotiate_connection_service(client) != NETNOX_RETURN_SUCCESS) {
+            SSH_DEBUG("open_session: negotiate_connection_service failed");
+            return NETNOX_RETURN_FAILED;
+        }
+        SSH_DEBUG("open_session: ssh-connection service accepted");
+    }
 
     if(netnox_ssh_send_channel_open_session(client) != NETNOX_RETURN_SUCCESS) {
         SSH_DEBUG("open_session: send CHANNEL_OPEN(session) failed");
@@ -2396,6 +2450,7 @@ netnox_return_t netnox_ssh_client_close(netnox_ssh_client_t * client)
     client->key_exchange_complete = 0u;
     client->pending_newkeys_len = 0u;
     client->userauth_service_ready = 0u;
+    client->connection_service_ready = 0u;
     client->authenticated = 0u;
     client->channel_open = 0u;
     client->local_channel_id = 0u;

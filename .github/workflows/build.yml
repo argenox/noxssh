@@ -40,6 +40,32 @@ jobs:
         shell: pwsh
         run: cmake --build build --config Release
 
+      - name: Verify daemon binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f bin/noxssh
+          test -f bin/noxsshd || test -f bin/noxsshd.exe
+
+      - name: CTest
+        if: runner.os != 'Windows'
+        run: cd build && ctest --output-on-failure
+
+      - name: CTest (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cd build; ctest -C Release --output-on-failure
+
+      - name: Smoke noxsshd (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash scripts/ci_smoke_sshd.sh
+
+      - name: Smoke noxsshd (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/ci_smoke_sshd.ps1
+
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:

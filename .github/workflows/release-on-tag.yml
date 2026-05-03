@@ -119,6 +119,13 @@ jobs:
           cmake -S . -B build
           cmake --build build --config Release --parallel
 
+      - name: Verify client and daemon binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f bin/noxssh
+          test -f bin/noxsshd || test -f bin/noxsshd.exe
+
       - name: Create release archives (Linux/macOS)
         if: ${{ matrix.os != 'windows-latest' }}
         shell: bash

@@ -32,6 +32,7 @@ add_subdirectory(noxtls EXCLUDE_FROM_ALL)
 
 add_library(netnox_ssh
     common/noxssh_common.c
+    common/noxssh_server.c
 )
 target_include_directories(netnox_ssh
     PUBLIC
@@ -59,3 +60,10 @@ target_compile_definitions(netnox_ssh
         NOXTLS_FEATURE_AES_CTR=1
 )
 add_subdirectory(client)
+add_subdirectory(server)
+
+option(NOXSSH_BUILD_TESTS "Build noxssh unit tests" ON)
+if(NOXSSH_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
