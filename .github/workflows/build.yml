@@ -10,7 +10,7 @@ on:
 jobs:
   build:
     name: Build
-    runs-on: [self-hosted, Linux, X64, ubuntu]
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository with submodules
