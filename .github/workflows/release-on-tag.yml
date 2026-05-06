@@ -77,19 +77,23 @@ jobs:
 
   build-release-assets:
     needs: validate-tag
+    name: Build release assets (${{ matrix.platform_name }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            artifact_suffix: linux-x64
-            archive_ext: tar.gz
-          - os: macos-latest
+            artifact_suffix: linux-x86_64
+            platform_name: Linux x86_64
+          - os: ubuntu-24.04-arm
+            artifact_suffix: linux-arm64
+            platform_name: Linux ARM64
+          - os: macos-13
+            artifact_suffix: macos-x86_64
+            platform_name: macOS x86_64
+          - os: macos-14
             artifact_suffix: macos-arm64
-            archive_ext: tar.gz
-          - os: windows-latest
-            artifact_suffix: windows-x64
-            archive_ext: zip
+            platform_name: macOS ARM64
 
     runs-on: ${{ matrix.os }}
 
@@ -105,22 +109,13 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Configure and build (Linux/macOS)
-        if: ${{ matrix.os != 'windows-latest' }}
+      - name: Configure and build
         shell: bash
         run: |
           cmake -S . -B build -D CMAKE_BUILD_TYPE=Release
           cmake --build build --parallel
 
-      - name: Configure and build (Windows)
-        if: ${{ matrix.os == 'windows-latest' }}
-        shell: pwsh
-        run: |
-          cmake -S . -B build
-          cmake --build build --config Release --parallel
-
-      - name: Create release archives (Linux/macOS)
-        if: ${{ matrix.os != 'windows-latest' }}
+      - name: Create release archives
         shell: bash
         run: |
           set -euo pipefail
@@ -130,17 +125,6 @@ jobs:
           cp -a bin/. package/
           cp README.md LICENSE.md COPYING.md package/
           tar -C package -czf "release-assets/noxssh-${{ matrix.artifact_suffix }}-v${VERSION}.tar.gz" .
-
-      - name: Create release archives (Windows)
-        if: ${{ matrix.os == 'windows-latest' }}
-        shell: powershell
-        run: |
-          $version = "${{ needs.validate-tag.outputs.noxssh_version }}"
-          New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
-          New-Item -ItemType Directory -Force -Path "package" | Out-Null
-          Copy-Item -Recurse -Force "bin\*" "package\"
-          Copy-Item -Force "README.md","LICENSE.md","COPYING.md" "package\"
-          Compress-Archive -Path "package\*" -DestinationPath "release-assets\noxssh-${{ matrix.artifact_suffix }}-v$version.zip" -Force
 
       - name: Upload release assets artifact
         uses: actions/upload-artifact@v4
