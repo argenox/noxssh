@@ -53,6 +53,7 @@ typedef int app_socket_t;
 #endif
 
 #include "version.h"
+#include "../noxtls/noxtls_version.h"
 #include "noxssh_common.h"
 
 /** @brief Default username when user@host is not provided. */
@@ -80,6 +81,7 @@ typedef struct
 static void noxssh_print_usage(const char * prog)
 {
     printf("%s " NOXSSH_VERSION_STRING "\n", (prog != NULL ? prog : "noxssh"));
+    printf("Using NoxTLS Library %s\n", NOXTLS_VERSION_STRING);
     printf("Usage: %s [-h] [-d|-dd|-ddd] [-T] [-p port] [-w password] [user@]host [command]\n", (prog != NULL ? prog : "noxssh"));
     printf("Options:\n");
     printf("  -h, --help     Show this help and exit.\n");
