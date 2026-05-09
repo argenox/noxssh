@@ -183,6 +183,8 @@ extern netnox_return_t netnox_ssh_client_authenticate(netnox_ssh_client_t * clie
 extern netnox_return_t netnox_ssh_client_open_session(netnox_ssh_client_t * client);
 extern netnox_return_t netnox_ssh_client_exec(netnox_ssh_client_t * client,
                                               const char * command);
+extern netnox_return_t netnox_ssh_client_request_shell_ex(netnox_ssh_client_t * client,
+                                                          uint8_t request_pty);
 extern netnox_return_t netnox_ssh_client_request_shell(netnox_ssh_client_t * client);
 extern netnox_return_t netnox_ssh_client_send_data(netnox_ssh_client_t * client,
                                                    const uint8_t * data,

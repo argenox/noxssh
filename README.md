@@ -49,7 +49,7 @@ The `noxssh` executable is produced in `bin/` (or `build/bin/` depending on your
 ### Usage
 
 ```text
-Usage: noxssh [-h] [-d|-dd|-ddd] [-p port] [-w password] [user@]host [command]
+Usage: noxssh [-h] [-d|-dd|-ddd] [-T] [-p port] [-w password] [user@]host [command]
 ```
 
 | Example | Description |
@@ -59,8 +59,9 @@ Usage: noxssh [-h] [-d|-dd|-ddd] [-p port] [-w password] [user@]host [command]
 | `noxssh user@example.com "uname -a"` | Run a single command and exit |
 | `noxssh -d user@example.com` | Basic debug logging |
 | `noxssh -ddd user@example.com` | Packet-level debug logging |
+| `noxssh -T user@example.com` | Request shell without PTY allocation |
 
-If `user@` is omitted, the default username is `user`. You are prompted for the password when using password authentication unless `-w` is provided.
+If `user@` is omitted, the default username is `user`. You are prompted for the password when using password authentication unless `-w` is provided. Use `-T` to disable PTY allocation (like OpenSSH), which is useful for non-interactive/automation scenarios.
 
 ---
 
