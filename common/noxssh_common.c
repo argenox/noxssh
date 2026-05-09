@@ -2153,7 +2153,8 @@ netnox_return_t netnox_ssh_client_exec(netnox_ssh_client_t * client, const char 
     return NETNOX_RETURN_SUCCESS;
 }
 
-netnox_return_t netnox_ssh_client_request_shell(netnox_ssh_client_t * client)
+netnox_return_t netnox_ssh_client_request_shell_ex(netnox_ssh_client_t * client,
+                                                   uint8_t request_pty)
 {
     uint8_t payload[512];
     uint32_t payload_len = 0u;
@@ -2171,62 +2172,66 @@ netnox_return_t netnox_ssh_client_request_shell(netnox_ssh_client_t * client)
         return NETNOX_RETURN_BAD_PARAM;
     }
 
-    /* Ask server for a PTY so shell behaves interactively (prompts/line editing). */
-    payload_len = 0u;
-    if(netnox_ssh_payload_append_u8(payload, &payload_len, (uint32_t)sizeof(payload), NETNOX_SSH_MSG_CHANNEL_REQUEST) != NETNOX_RETURN_SUCCESS) {
-        return NETNOX_RETURN_FAILED;
+    if(request_pty != 0u) {
+        /* Ask server for a PTY so shell behaves interactively (prompts/line editing). */
+        payload_len = 0u;
+        if(netnox_ssh_payload_append_u8(payload, &payload_len, (uint32_t)sizeof(payload), NETNOX_SSH_MSG_CHANNEL_REQUEST) != NETNOX_RETURN_SUCCESS) {
+            return NETNOX_RETURN_FAILED;
+        }
+        if(netnox_ssh_payload_append_u32(payload, &payload_len, (uint32_t)sizeof(payload), client->remote_channel_id) != NETNOX_RETURN_SUCCESS) {
+            return NETNOX_RETURN_FAILED;
+        }
+        if(netnox_ssh_payload_append_string(payload, &payload_len, (uint32_t)sizeof(payload),
+                                            (const uint8_t *)"pty-req",
+                                            (uint32_t)strlen("pty-req")) != NETNOX_RETURN_SUCCESS) {
+            return NETNOX_RETURN_FAILED;
+        }
+        if(netnox_ssh_payload_append_u8(payload, &payload_len, (uint32_t)sizeof(payload), 1u) != NETNOX_RETURN_SUCCESS) {
+            return NETNOX_RETURN_FAILED;
+        }
+        if(netnox_ssh_payload_append_string(payload, &payload_len, (uint32_t)sizeof(payload),
+                                            (const uint8_t *)"xterm-256color",
+                                            (uint32_t)strlen("xterm-256color")) != NETNOX_RETURN_SUCCESS) {
+            return NETNOX_RETURN_FAILED;
+        }
+        if(netnox_ssh_payload_append_u32(payload, &payload_len, (uint32_t)sizeof(payload), 80u) != NETNOX_RETURN_SUCCESS) {
+            return NETNOX_RETURN_FAILED;
+        }
+        if(netnox_ssh_payload_append_u32(payload, &payload_len, (uint32_t)sizeof(payload), 24u) != NETNOX_RETURN_SUCCESS) {
+            return NETNOX_RETURN_FAILED;
+        }
+        if(netnox_ssh_payload_append_u32(payload, &payload_len, (uint32_t)sizeof(payload), 0u) != NETNOX_RETURN_SUCCESS) {
+            return NETNOX_RETURN_FAILED;
+        }
+        if(netnox_ssh_payload_append_u32(payload, &payload_len, (uint32_t)sizeof(payload), 0u) != NETNOX_RETURN_SUCCESS) {
+            return NETNOX_RETURN_FAILED;
+        }
+        if(netnox_ssh_payload_append_string(payload, &payload_len, (uint32_t)sizeof(payload), NULL, 0u) != NETNOX_RETURN_SUCCESS) {
+            return NETNOX_RETURN_FAILED;
+        }
+        if(netnox_ssh_send_packet(client, payload, payload_len) != NETNOX_RETURN_SUCCESS) {
+            SSH_DEBUG("request_shell: send CHANNEL_REQUEST(pty-req) failed");
+            return NETNOX_RETURN_FAILED;
+        }
+        if(netnox_ssh_wait_for_message(client,
+                                       NETNOX_SSH_MSG_CHANNEL_SUCCESS,
+                                       NETNOX_SSH_MSG_CHANNEL_FAILURE,
+                                       rsp,
+                                       (uint32_t)sizeof(rsp),
+                                       &rsp_len) != NETNOX_RETURN_SUCCESS) {
+            SSH_DEBUG("request_shell: wait_for_message pty-req success/failure failed");
+            return NETNOX_RETURN_FAILED;
+        }
+        if(rsp_len == 0u || rsp[0] != NETNOX_SSH_MSG_CHANNEL_SUCCESS) {
+            SSH_DEBUG("request_shell: pty-req rejected (rsp_len=%u type=%u)",
+                      (unsigned)rsp_len,
+                      (unsigned)(rsp_len > 0u ? rsp[0] : 0xFFu));
+            return NETNOX_RETURN_FAILED;
+        }
+        SSH_DEBUG("request_shell: CHANNEL_REQUEST(pty-req) accepted");
+    } else {
+        SSH_DEBUG("request_shell: PTY request disabled by caller");
     }
-    if(netnox_ssh_payload_append_u32(payload, &payload_len, (uint32_t)sizeof(payload), client->remote_channel_id) != NETNOX_RETURN_SUCCESS) {
-        return NETNOX_RETURN_FAILED;
-    }
-    if(netnox_ssh_payload_append_string(payload, &payload_len, (uint32_t)sizeof(payload),
-                                        (const uint8_t *)"pty-req",
-                                        (uint32_t)strlen("pty-req")) != NETNOX_RETURN_SUCCESS) {
-        return NETNOX_RETURN_FAILED;
-    }
-    if(netnox_ssh_payload_append_u8(payload, &payload_len, (uint32_t)sizeof(payload), 1u) != NETNOX_RETURN_SUCCESS) {
-        return NETNOX_RETURN_FAILED;
-    }
-    if(netnox_ssh_payload_append_string(payload, &payload_len, (uint32_t)sizeof(payload),
-                                        (const uint8_t *)"xterm-256color",
-                                        (uint32_t)strlen("xterm-256color")) != NETNOX_RETURN_SUCCESS) {
-        return NETNOX_RETURN_FAILED;
-    }
-    if(netnox_ssh_payload_append_u32(payload, &payload_len, (uint32_t)sizeof(payload), 80u) != NETNOX_RETURN_SUCCESS) {
-        return NETNOX_RETURN_FAILED;
-    }
-    if(netnox_ssh_payload_append_u32(payload, &payload_len, (uint32_t)sizeof(payload), 24u) != NETNOX_RETURN_SUCCESS) {
-        return NETNOX_RETURN_FAILED;
-    }
-    if(netnox_ssh_payload_append_u32(payload, &payload_len, (uint32_t)sizeof(payload), 0u) != NETNOX_RETURN_SUCCESS) {
-        return NETNOX_RETURN_FAILED;
-    }
-    if(netnox_ssh_payload_append_u32(payload, &payload_len, (uint32_t)sizeof(payload), 0u) != NETNOX_RETURN_SUCCESS) {
-        return NETNOX_RETURN_FAILED;
-    }
-    if(netnox_ssh_payload_append_string(payload, &payload_len, (uint32_t)sizeof(payload), NULL, 0u) != NETNOX_RETURN_SUCCESS) {
-        return NETNOX_RETURN_FAILED;
-    }
-    if(netnox_ssh_send_packet(client, payload, payload_len) != NETNOX_RETURN_SUCCESS) {
-        SSH_DEBUG("request_shell: send CHANNEL_REQUEST(pty-req) failed");
-        return NETNOX_RETURN_FAILED;
-    }
-    if(netnox_ssh_wait_for_message(client,
-                                   NETNOX_SSH_MSG_CHANNEL_SUCCESS,
-                                   NETNOX_SSH_MSG_CHANNEL_FAILURE,
-                                   rsp,
-                                   (uint32_t)sizeof(rsp),
-                                   &rsp_len) != NETNOX_RETURN_SUCCESS) {
-        SSH_DEBUG("request_shell: wait_for_message pty-req success/failure failed");
-        return NETNOX_RETURN_FAILED;
-    }
-    if(rsp_len == 0u || rsp[0] != NETNOX_SSH_MSG_CHANNEL_SUCCESS) {
-        SSH_DEBUG("request_shell: pty-req rejected (rsp_len=%u type=%u)",
-                  (unsigned)rsp_len,
-                  (unsigned)(rsp_len > 0u ? rsp[0] : 0xFFu));
-        return NETNOX_RETURN_FAILED;
-    }
-    SSH_DEBUG("request_shell: CHANNEL_REQUEST(pty-req) accepted");
 
     payload_len = 0u;
     if(netnox_ssh_payload_append_u8(payload, &payload_len, (uint32_t)sizeof(payload), NETNOX_SSH_MSG_CHANNEL_REQUEST) != NETNOX_RETURN_SUCCESS) {
@@ -2266,6 +2271,11 @@ netnox_return_t netnox_ssh_client_request_shell(netnox_ssh_client_t * client)
     }
     SSH_DEBUG("request_shell: CHANNEL_REQUEST(shell) accepted");
     return NETNOX_RETURN_SUCCESS;
+}
+
+netnox_return_t netnox_ssh_client_request_shell(netnox_ssh_client_t * client)
+{
+    return netnox_ssh_client_request_shell_ex(client, 1u);
 }
 
 netnox_return_t netnox_ssh_client_send_data(netnox_ssh_client_t * client,

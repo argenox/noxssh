@@ -80,12 +80,13 @@ typedef struct
 static void noxssh_print_usage(const char * prog)
 {
     printf("%s " NOXSSH_VERSION_STRING "\n", (prog != NULL ? prog : "noxssh"));
-    printf("Usage: %s [-h] [-d|-dd|-ddd] [-p port] [-w password] [user@]host [command]\n", (prog != NULL ? prog : "noxssh"));
+    printf("Usage: %s [-h] [-d|-dd|-ddd] [-T] [-p port] [-w password] [user@]host [command]\n", (prog != NULL ? prog : "noxssh"));
     printf("Options:\n");
     printf("  -h, --help     Show this help and exit.\n");
     printf("  -d             Enable basic SSH debug output.\n");
     printf("  -dd            Enable verbose SSH debug output.\n");
     printf("  -ddd           Enable packet-level SSH debug output.\n");
+    printf("  -T             Disable PTY allocation for shell sessions.\n");
     printf("  -p port        SSH server port (default: 22).\n");
     printf("  -w password   Password (avoid on command line in production).\n");
     printf("Examples:\n");
@@ -514,6 +515,7 @@ int main(int argc, char ** argv)
     char password[NOXSSH_MAX_PASSWORD_LEN + 1u];
     int password_set = 0;
     int command_set = 0;
+    int request_pty = 1;
     int debug_level = 0;
     int i = 0;
     noxssh_conn_t conn;
@@ -586,6 +588,11 @@ int main(int argc, char ** argv)
             if(debug_level > 3) {
                 debug_level = 3;
             }
+            continue;
+        }
+
+        if(strcmp(argv[i], "-T") == 0) {
+            request_pty = 0;
             continue;
         }
 
@@ -778,7 +785,7 @@ int main(int argc, char ** argv)
             }
             noxssh_print_channel_output(&client);
         } else {
-            rc = netnox_ssh_client_request_shell(&client);
+            rc = netnox_ssh_client_request_shell_ex(&client, (uint8_t)request_pty);
             if(rc != NETNOX_RETURN_SUCCESS) {
                 printf("ERROR: Failed to request remote shell.\n");
                 (void)netnox_ssh_client_close(&client);
