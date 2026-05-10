@@ -49,7 +49,7 @@ The `noxssh` executable is produced in `bin/` (or `build/bin/` depending on your
 ### Usage
 
 ```text
-Usage: noxssh [-h] [-d|-dd|-ddd] [-T] [-p port] [-w password] [user@]host [command]
+Usage: noxssh [-h] [-d|-dd|-ddd] [-T] [--batch] [--strict-host-key] [--strict-host-key-checking mode] [--host-key-pin hex] [--known-hosts-file path] [--ed25519-key hex] [-i identity_file] [--connect-retries n] [--connect-timeout ms] [--io-timeout ms] [--server-alive-interval sec] [--server-alive-count-max n] [--rekey-interval sec] [-p port] [-w password] [user@]host [command]
 ```
 
 | Example | Description |
@@ -60,8 +60,29 @@ Usage: noxssh [-h] [-d|-dd|-ddd] [-T] [-p port] [-w password] [user@]host [comma
 | `noxssh -d user@example.com` | Basic debug logging |
 | `noxssh -ddd user@example.com` | Packet-level debug logging |
 | `noxssh -T user@example.com` | Request shell without PTY allocation |
+| `noxssh --strict-host-key user@example.com` | Reject unknown host keys (no first-use prompt) |
+| `noxssh --strict-host-key-checking accept-new user@example.com` | Auto-trust first-seen host keys, reject changed keys |
+| `noxssh --host-key-pin <sha256hex> user@example.com` | Pin server host key fingerprint |
+| `noxssh --known-hosts-file ~/.noxssh/known_hosts.custom user@example.com` | Use custom known_hosts path |
+| `noxssh --ed25519-key <64hexseed> user@example.com` | Try Ed25519 publickey auth |
+| `noxssh -i id_ed25519 user@example.com` | Load Ed25519 key from file (hex seed or unencrypted OpenSSH key) |
+| `noxssh --server-alive-interval 30 user@example.com` | Send SSH keepalive every 30s of idle I/O |
+| `noxssh --server-alive-interval 30 --server-alive-count-max 3 user@example.com` | Drop dead idle sessions after 3 unanswered keepalives |
+| `noxssh --rekey-interval 900 user@example.com` | Trigger transport key re-exchange every 15 minutes |
+| `noxssh --batch --connect-retries 3 --connect-timeout 5000 --io-timeout 10000 user@example.com "uptime"` | Non-interactive mode with retries and timeouts |
 
-If `user@` is omitted, the default username is `user`. You are prompted for the password when using password authentication unless `-w` is provided. Use `-T` to disable PTY allocation (like OpenSSH), which is useful for non-interactive/automation scenarios.
+If `user@` is omitted, the default username is `user`. You are prompted for the password when using password authentication unless `-w` is provided. Use `-T` to disable PTY allocation (like OpenSSH), which is useful for non-interactive/automation scenarios. On connect, `noxssh` prints the server host-key fingerprint and enforces trust via `~/.noxssh/known_hosts` (TOFU prompt by default, configurable with `--strict-host-key-checking yes|no|accept-new|ask`, or strict reject mode via `--strict-host-key`). You can also pin an expected fingerprint with `--host-key-pin`.
+
+When no explicit key is provided, `noxssh` also tries default identity paths (`~/.ssh/id_ed25519`, `~/.ssh/id_ed25519.seed`, `~/.noxssh/id_ed25519.seed`). Encrypted OpenSSH keys are detected but not yet supported.
+If key auth is attempted first and rejected, `noxssh` falls back to prompting for password automatically.
+In command mode (`noxssh user@host "cmd"`), the process exit code now mirrors the remote `exit-status` when provided by the server.
+Use `--batch` to disable all interactive prompts (TOFU/password prompts); unknown hosts or missing credentials fail fast in this mode.
+Use `--io-timeout` to bound socket recv/send stalls during handshake/auth/session.
+Use `--server-alive-interval` to send periodic SSH keepalive packets (`SSH_MSG_IGNORE`) during idle sessions.
+`--server-alive-count-max` controls how many unanswered keepalives are tolerated before disconnect (default: 3).
+Use `--rekey-interval` to trigger periodic key re-exchange during long-lived sessions.
+Server-initiated `SSH_MSG_KEXINIT` rekey events are also handled during active sessions.
+`noxssh` also reads `~/.ssh/config` for `Host`, `HostName`, `User`, `Port`, `IdentityFile`, `UserKnownHostsFile`, `StrictHostKeyChecking`, `BatchMode`, `ConnectTimeout`, `ServerAliveInterval`, `ServerAliveCountMax`, and `RekeyInterval` (CLI flags still take precedence).
 
 ---
 

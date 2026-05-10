@@ -101,6 +101,8 @@ static void netnox_ssh_debug_hex_full(const char * label, const uint8_t * buf, u
     (void)fprintf(stderr, "\n");
 }
 #include "../noxtls/noxtls-lib/pkc/x25519/noxtls_x25519.h"
+#include "../noxtls/noxtls-lib/pkc/ed25519/noxtls_ed25519.h"
+#include "../noxtls/noxtls-lib/pkc/rsa/noxtls_rsa.h"
 #include "../noxtls/noxtls-lib/mdigest/noxtls_sha.h"
 #include "../noxtls/noxtls-lib/encryption/aes/noxtls_aes.h"
 #include "../noxtls/noxtls-lib/mdigest/noxtls_hash.h"
@@ -134,6 +136,19 @@ static netnox_return_t netnox_ssh_wait_for_message(netnox_ssh_client_t * client,
                                                    uint8_t * out_payload,
                                                    uint32_t out_payload_max,
                                                    uint32_t * out_payload_len);
+static netnox_return_t netnox_ssh_handle_server_kexinit(netnox_ssh_client_t * client,
+                                                        const uint8_t * server_kexinit,
+                                                        uint32_t server_kexinit_len);
+static netnox_return_t netnox_ssh_sha256(const uint8_t * data,
+                                         uint32_t data_len,
+                                         uint8_t * out_hash32);
+static netnox_return_t netnox_ssh_verify_server_host_key_signature(const uint8_t * host_key_blob,
+                                                                    uint32_t host_key_blob_len,
+                                                                    const uint8_t * sig_blob,
+                                                                    uint32_t sig_blob_len,
+                                                                    const uint8_t * exchange_hash,
+                                                                    uint32_t exchange_hash_len);
+static netnox_return_t netnox_ssh_wait_userauth_result(netnox_ssh_client_t * client);
 
 /**
  * @brief Compute HMAC-SHA256(key, data) into mac_out (32 bytes).
@@ -178,6 +193,185 @@ static netnox_return_t netnox_ssh_hmac_sha256(const uint8_t * key,
     noxtls_sha_update(&ctx, inner_hash, 32u);
     noxtls_sha_finish(&ctx, mac_out);
     return NETNOX_RETURN_SUCCESS;
+}
+
+static netnox_return_t netnox_ssh_sha256(const uint8_t * data,
+                                         uint32_t data_len,
+                                         uint8_t * out_hash32)
+{
+    noxtls_sha_ctx_t sha_ctx;
+
+    if((data == NULL && data_len != 0u) || out_hash32 == NULL) {
+        return NETNOX_RETURN_BAD_PARAM;
+    }
+    if(noxtls_sha_init(&sha_ctx, NOXTLS_HASH_SHA_256) != NOXTLS_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(data_len > 0u && noxtls_sha_update(&sha_ctx, (uint8_t *)data, data_len) != NOXTLS_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(noxtls_sha_finish(&sha_ctx, out_hash32) != NOXTLS_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    return NETNOX_RETURN_SUCCESS;
+}
+
+static netnox_return_t netnox_ssh_verify_server_host_key_signature(const uint8_t * host_key_blob,
+                                                                    uint32_t host_key_blob_len,
+                                                                    const uint8_t * sig_blob,
+                                                                    uint32_t sig_blob_len,
+                                                                    const uint8_t * exchange_hash,
+                                                                    uint32_t exchange_hash_len)
+{
+    uint32_t hk_off = 0u;
+    uint32_t sig_off = 0u;
+    const uint8_t * hk_alg = NULL;
+    uint32_t hk_alg_len = 0u;
+    const uint8_t * hk_e = NULL;
+    uint32_t hk_e_len = 0u;
+    const uint8_t * hk_n = NULL;
+    uint32_t hk_n_len = 0u;
+    const uint8_t * sig_alg = NULL;
+    uint32_t sig_alg_len = 0u;
+    const uint8_t * sig_data = NULL;
+    uint32_t sig_data_len = 0u;
+    uint8_t rsa_sig_norm[512];
+    rsa_key_t rsa_key;
+    noxtls_hash_algos_t rsa_hash = NOXTLS_HASH_SHA_256;
+    noxtls_return_t rsa_rc = NOXTLS_RETURN_FAILED;
+    rsa_key_size_t rsa_size = RSA_2048_BIT;
+    uint32_t n_trim = 0u;
+    uint32_t e_trim = 0u;
+    static const char alg_ed25519[] = "ssh-ed25519";
+    static const char alg_ssh_rsa[] = "ssh-rsa";
+    static const char alg_rsa_sha2_256[] = "rsa-sha2-256";
+
+    if(host_key_blob == NULL || host_key_blob_len == 0u ||
+       sig_blob == NULL || sig_blob_len == 0u ||
+       exchange_hash == NULL || exchange_hash_len == 0u) {
+        return NETNOX_RETURN_BAD_PARAM;
+    }
+
+    if(netnox_ssh_payload_read_string_view(host_key_blob, host_key_blob_len, &hk_off, &hk_alg, &hk_alg_len) != NETNOX_RETURN_SUCCESS) {
+        SSH_DEBUG("hostkey verify: failed to parse host key blob");
+        return NETNOX_RETURN_FAILED;
+    }
+    if(netnox_ssh_payload_read_string_view(sig_blob, sig_blob_len, &sig_off, &sig_alg, &sig_alg_len) != NETNOX_RETURN_SUCCESS ||
+       netnox_ssh_payload_read_string_view(sig_blob, sig_blob_len, &sig_off, &sig_data, &sig_data_len) != NETNOX_RETURN_SUCCESS) {
+        SSH_DEBUG("hostkey verify: failed to parse signature blob");
+        return NETNOX_RETURN_FAILED;
+    }
+
+    if(hk_alg_len == (uint32_t)strlen(alg_ed25519) &&
+       memcmp(hk_alg, alg_ed25519, (uint32_t)strlen(alg_ed25519)) == 0 &&
+       sig_alg_len == (uint32_t)strlen(alg_ed25519) &&
+       memcmp(sig_alg, alg_ed25519, (uint32_t)strlen(alg_ed25519)) == 0) {
+        if(netnox_ssh_payload_read_string_view(host_key_blob, host_key_blob_len, &hk_off, &hk_e, &hk_e_len) != NETNOX_RETURN_SUCCESS) {
+            SSH_DEBUG("hostkey verify: failed to parse ed25519 key bytes");
+            return NETNOX_RETURN_FAILED;
+        }
+        if(hk_e_len != NOXTLS_ED25519_PUBLIC_KEY_SIZE || sig_data_len != NOXTLS_ED25519_SIGNATURE_SIZE) {
+            SSH_DEBUG("hostkey verify: invalid ed25519 key/signature length (key=%u sig=%u)",
+                      (unsigned)hk_e_len,
+                      (unsigned)sig_data_len);
+            return NETNOX_RETURN_FAILED;
+        }
+        if(noxtls_ed25519_verify(hk_e, exchange_hash, exchange_hash_len, sig_data) != NOXTLS_RETURN_SUCCESS) {
+            SSH_DEBUG("hostkey verify: ed25519 signature invalid");
+            return NETNOX_RETURN_FAILED;
+        }
+        SSH_DEBUG("hostkey verify: ed25519 signature valid");
+        return NETNOX_RETURN_SUCCESS;
+    }
+
+    if(hk_alg_len == (uint32_t)strlen(alg_ssh_rsa) &&
+       memcmp(hk_alg, alg_ssh_rsa, (uint32_t)strlen(alg_ssh_rsa)) == 0 &&
+       ((sig_alg_len == (uint32_t)strlen(alg_rsa_sha2_256) &&
+         memcmp(sig_alg, alg_rsa_sha2_256, (uint32_t)strlen(alg_rsa_sha2_256)) == 0) ||
+        (sig_alg_len == (uint32_t)strlen(alg_ssh_rsa) &&
+         memcmp(sig_alg, alg_ssh_rsa, (uint32_t)strlen(alg_ssh_rsa)) == 0))) {
+        if(netnox_ssh_payload_read_string_view(host_key_blob, host_key_blob_len, &hk_off, &hk_e, &hk_e_len) != NETNOX_RETURN_SUCCESS ||
+           netnox_ssh_payload_read_string_view(host_key_blob, host_key_blob_len, &hk_off, &hk_n, &hk_n_len) != NETNOX_RETURN_SUCCESS) {
+            SSH_DEBUG("hostkey verify: failed to parse rsa key components");
+            return NETNOX_RETURN_FAILED;
+        }
+        while(n_trim < hk_n_len && hk_n[n_trim] == 0u) {
+            n_trim++;
+        }
+        while(e_trim < hk_e_len && hk_e[e_trim] == 0u) {
+            e_trim++;
+        }
+        hk_n += n_trim;
+        hk_n_len -= n_trim;
+        hk_e += e_trim;
+        hk_e_len -= e_trim;
+        if(hk_n_len == 0u || hk_e_len == 0u) {
+            SSH_DEBUG("hostkey verify: invalid rsa modulus/exponent");
+            return NETNOX_RETURN_FAILED;
+        }
+
+        if(hk_n_len <= 128u) {
+            rsa_size = RSA_1024_BIT;
+        } else if(hk_n_len <= 256u) {
+            rsa_size = RSA_2048_BIT;
+        } else if(hk_n_len <= 384u) {
+            rsa_size = RSA_3072_BIT;
+        } else if(hk_n_len <= 512u) {
+            rsa_size = RSA_4096_BIT;
+        } else {
+            SSH_DEBUG("hostkey verify: unsupported rsa modulus length: %u", (unsigned)hk_n_len);
+            return NETNOX_RETURN_FAILED;
+        }
+
+        if(sig_alg_len == (uint32_t)strlen(alg_rsa_sha2_256)) {
+            rsa_hash = NOXTLS_HASH_SHA_256;
+        } else {
+            rsa_hash = NOXTLS_HASH_SHA1;
+        }
+
+        if(noxtls_rsa_key_init(&rsa_key, rsa_size) != NOXTLS_RETURN_SUCCESS) {
+            SSH_DEBUG("hostkey verify: rsa key init failed");
+            return NETNOX_RETURN_FAILED;
+        }
+        if(hk_n_len > rsa_key.key_bytes || hk_e_len > rsa_key.key_bytes) {
+            (void)noxtls_rsa_key_free(&rsa_key);
+            SSH_DEBUG("hostkey verify: rsa key components exceed selected key size");
+            return NETNOX_RETURN_FAILED;
+        }
+        memcpy(&rsa_key.n[rsa_key.key_bytes - hk_n_len], hk_n, hk_n_len);
+        memcpy(&rsa_key.e[rsa_key.key_bytes - hk_e_len], hk_e, hk_e_len);
+
+        if(sig_data_len > rsa_key.key_bytes) {
+            (void)noxtls_rsa_key_free(&rsa_key);
+            SSH_DEBUG("hostkey verify: rsa signature too large");
+            return NETNOX_RETURN_FAILED;
+        }
+        memset(rsa_sig_norm, 0, sizeof(rsa_sig_norm));
+        if(rsa_key.key_bytes > sizeof(rsa_sig_norm)) {
+            (void)noxtls_rsa_key_free(&rsa_key);
+            SSH_DEBUG("hostkey verify: rsa key bytes exceed local buffer");
+            return NETNOX_RETURN_FAILED;
+        }
+        memcpy(&rsa_sig_norm[rsa_key.key_bytes - sig_data_len], sig_data, sig_data_len);
+        rsa_rc = noxtls_rsa_verify(&rsa_key,
+                                   exchange_hash,
+                                   exchange_hash_len,
+                                   rsa_sig_norm,
+                                   rsa_key.key_bytes,
+                                   rsa_hash);
+        (void)noxtls_rsa_key_free(&rsa_key);
+        if(rsa_rc != NOXTLS_RETURN_SUCCESS) {
+            SSH_DEBUG("hostkey verify: rsa signature invalid");
+            return NETNOX_RETURN_FAILED;
+        }
+        SSH_DEBUG("hostkey verify: rsa signature valid");
+        return NETNOX_RETURN_SUCCESS;
+    }
+
+    SSH_DEBUG("hostkey verify: unsupported host key algorithm: %.*s",
+              (int)hk_alg_len,
+              (const char *)hk_alg);
+    return NETNOX_RETURN_FAILED;
 }
 
 /**
@@ -639,27 +833,42 @@ static netnox_return_t netnox_ssh_validate_server_kexinit(const uint8_t * payloa
 
     if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &field, &field_len) != NETNOX_RETURN_SUCCESS ||
        netnox_ssh_namelist_contains(field, field_len, NETNOX_SSH_REQUIRED_KEX_ALG) == 0) {
+        SSH_DEBUG("kexinit: required kex algorithm not offered: %s", NETNOX_SSH_REQUIRED_KEX_ALG);
         return NETNOX_RETURN_FAILED;
     }
-    if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &field, &field_len) != NETNOX_RETURN_SUCCESS) {
+    if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &field, &field_len) != NETNOX_RETURN_SUCCESS ||
+       netnox_ssh_namelist_contains(field, field_len, NETNOX_SSH_REQUIRED_HOST_KEY_ALG) == 0) {
+        SSH_DEBUG("kexinit: required host key algorithm not offered: %s", NETNOX_SSH_REQUIRED_HOST_KEY_ALG);
         return NETNOX_RETURN_FAILED;
     }
-    if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &field, &field_len) != NETNOX_RETURN_SUCCESS) {
+    if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &field, &field_len) != NETNOX_RETURN_SUCCESS ||
+       netnox_ssh_namelist_contains(field, field_len, NETNOX_SSH_REQUIRED_CIPHER_ALG) == 0) {
+        SSH_DEBUG("kexinit: required c2s cipher not offered: %s", NETNOX_SSH_REQUIRED_CIPHER_ALG);
         return NETNOX_RETURN_FAILED;
     }
-    if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &field, &field_len) != NETNOX_RETURN_SUCCESS) {
+    if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &field, &field_len) != NETNOX_RETURN_SUCCESS ||
+       netnox_ssh_namelist_contains(field, field_len, NETNOX_SSH_REQUIRED_CIPHER_ALG) == 0) {
+        SSH_DEBUG("kexinit: required s2c cipher not offered: %s", NETNOX_SSH_REQUIRED_CIPHER_ALG);
         return NETNOX_RETURN_FAILED;
     }
-    if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &field, &field_len) != NETNOX_RETURN_SUCCESS) {
+    if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &field, &field_len) != NETNOX_RETURN_SUCCESS ||
+       netnox_ssh_namelist_contains(field, field_len, NETNOX_SSH_REQUIRED_MAC_ALG) == 0) {
+        SSH_DEBUG("kexinit: required c2s MAC not offered: %s", NETNOX_SSH_REQUIRED_MAC_ALG);
         return NETNOX_RETURN_FAILED;
     }
-    if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &field, &field_len) != NETNOX_RETURN_SUCCESS) {
+    if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &field, &field_len) != NETNOX_RETURN_SUCCESS ||
+       netnox_ssh_namelist_contains(field, field_len, NETNOX_SSH_REQUIRED_MAC_ALG) == 0) {
+        SSH_DEBUG("kexinit: required s2c MAC not offered: %s", NETNOX_SSH_REQUIRED_MAC_ALG);
         return NETNOX_RETURN_FAILED;
     }
-    if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &field, &field_len) != NETNOX_RETURN_SUCCESS) {
+    if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &field, &field_len) != NETNOX_RETURN_SUCCESS ||
+       netnox_ssh_namelist_contains(field, field_len, NETNOX_SSH_REQUIRED_COMPRESSION_ALG) == 0) {
+        SSH_DEBUG("kexinit: required c2s compression not offered: %s", NETNOX_SSH_REQUIRED_COMPRESSION_ALG);
         return NETNOX_RETURN_FAILED;
     }
-    if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &field, &field_len) != NETNOX_RETURN_SUCCESS) {
+    if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &field, &field_len) != NETNOX_RETURN_SUCCESS ||
+       netnox_ssh_namelist_contains(field, field_len, NETNOX_SSH_REQUIRED_COMPRESSION_ALG) == 0) {
+        SSH_DEBUG("kexinit: required s2c compression not offered: %s", NETNOX_SSH_REQUIRED_COMPRESSION_ALG);
         return NETNOX_RETURN_FAILED;
     }
 
@@ -1099,6 +1308,17 @@ static netnox_return_t netnox_ssh_perform_curve25519_kex(netnox_ssh_client_t * c
     if(sig_h_len == 0u || pub_s_len != 32u) {
         return NETNOX_RETURN_FAILED;
     }
+    if(host_key_blob_len == 0u || host_key_blob_len > NETNOX_SSH_MAX_HOST_KEY_BLOB_LEN) {
+        return NETNOX_RETURN_FAILED;
+    }
+    memcpy(client->server_host_key_blob, host_key_blob, host_key_blob_len);
+    client->server_host_key_blob_len = host_key_blob_len;
+    if(netnox_ssh_sha256(host_key_blob,
+                         host_key_blob_len,
+                         client->server_host_key_fingerprint) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    client->server_host_key_ready = 1u;
     if(noxtls_x25519_shared_secret(priv, pub_s, shared_raw) != NOXTLS_RETURN_SUCCESS) {
         return NETNOX_RETURN_FAILED;
     }
@@ -1112,6 +1332,14 @@ static netnox_return_t netnox_ssh_perform_curve25519_kex(netnox_ssh_client_t * c
                                         shared_raw,
                                         (uint32_t)sizeof(shared_raw),
                                         client->session_id) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(netnox_ssh_verify_server_host_key_signature(host_key_blob,
+                                                   host_key_blob_len,
+                                                   sig_h,
+                                                   sig_h_len,
+                                                   client->session_id,
+                                                   32u) != NETNOX_RETURN_SUCCESS) {
         return NETNOX_RETURN_FAILED;
     }
     client->session_id_len = 32u;
@@ -1628,6 +1856,51 @@ static netnox_return_t netnox_ssh_exchange_kexinit(netnox_ssh_client_t * client)
     return netnox_ssh_perform_curve25519_kex(client);
 }
 
+static netnox_return_t netnox_ssh_handle_server_kexinit(netnox_ssh_client_t * client,
+                                                        const uint8_t * server_kexinit,
+                                                        uint32_t server_kexinit_len)
+{
+    uint8_t tx_payload[NETNOX_SSH_KEXINIT_PAYLOAD_MAX_LEN];
+    uint32_t tx_payload_len = 0u;
+
+    if(client == NULL || server_kexinit == NULL || server_kexinit_len == 0u) {
+        return NETNOX_RETURN_BAD_PARAM;
+    }
+    if(server_kexinit[0] != NETNOX_SSH_MSG_KEXINIT) {
+        return NETNOX_RETURN_BAD_PARAM;
+    }
+    if(server_kexinit_len > NETNOX_SSH_MAX_KEXINIT_PAYLOAD_LEN) {
+        SSH_DEBUG("rekey(server-init): server KEXINIT too long");
+        return NETNOX_RETURN_FAILED;
+    }
+    if(netnox_ssh_validate_server_kexinit(server_kexinit, server_kexinit_len) != NETNOX_RETURN_SUCCESS) {
+        SSH_DEBUG("rekey(server-init): validate_server_kexinit failed");
+        return NETNOX_RETURN_FAILED;
+    }
+    memcpy(client->kexinit_server_payload, server_kexinit, server_kexinit_len);
+    client->kexinit_server_payload_len = server_kexinit_len;
+
+    if(netnox_ssh_build_kexinit_payload(tx_payload,
+                                        &tx_payload_len,
+                                        (uint32_t)sizeof(tx_payload)) != NETNOX_RETURN_SUCCESS) {
+        SSH_DEBUG("rekey(server-init): build_kexinit_payload failed");
+        return NETNOX_RETURN_FAILED;
+    }
+    if(tx_payload_len > NETNOX_SSH_MAX_KEXINIT_PAYLOAD_LEN) {
+        SSH_DEBUG("rekey(server-init): local KEXINIT too long");
+        return NETNOX_RETURN_FAILED;
+    }
+    memcpy(client->kexinit_client_payload, tx_payload, tx_payload_len);
+    client->kexinit_client_payload_len = tx_payload_len;
+    if(netnox_ssh_send_packet(client, tx_payload, tx_payload_len) != NETNOX_RETURN_SUCCESS) {
+        SSH_DEBUG("rekey(server-init): send local KEXINIT failed");
+        return NETNOX_RETURN_FAILED;
+    }
+    client->kexinit_exchanged = 1u;
+    SSH_DEBUG("rekey(server-init): performing Curve25519 KEX");
+    return netnox_ssh_perform_curve25519_kex(client);
+}
+
 /**
  * @brief Receive packets until one of two expected message IDs is observed.
  * @internal
@@ -1665,6 +1938,14 @@ static netnox_return_t netnox_ssh_wait_for_message(netnox_ssh_client_t * client,
             return NETNOX_RETURN_FAILED;
         }
         if(rx_payload_len == 0u) {
+            continue;
+        }
+        if(rx_payload[0] == NETNOX_SSH_MSG_KEXINIT) {
+            SSH_DEBUG("wait_for_message: handling server-initiated KEXINIT");
+            if(netnox_ssh_handle_server_kexinit(client, rx_payload, rx_payload_len) != NETNOX_RETURN_SUCCESS) {
+                SSH_DEBUG("wait_for_message: server-initiated rekey failed");
+                return NETNOX_RETURN_FAILED;
+            }
             continue;
         }
         if(rx_payload[0] == expect_a || rx_payload[0] == expect_b) {
@@ -1800,6 +2081,133 @@ static netnox_return_t netnox_ssh_send_userauth_password(netnox_ssh_client_t * c
 }
 
 /**
+ * @brief Send Ed25519 publickey userauth request (with signature).
+ * @internal
+ */
+static netnox_return_t netnox_ssh_send_userauth_publickey_ed25519(netnox_ssh_client_t * client)
+{
+    uint8_t payload[1024];
+    uint8_t pubkey_blob[256];
+    uint8_t sig_blob[256];
+    uint8_t to_sign[1400];
+    uint8_t signature[NOXTLS_ED25519_SIGNATURE_SIZE];
+    uint32_t payload_len = 0u;
+    uint32_t pubkey_blob_len = 0u;
+    uint32_t sig_blob_len = 0u;
+    uint32_t to_sign_len = 0u;
+    uint32_t req_no_sig_len = 0u;
+
+    if(client == NULL || client->has_ed25519_key == 0u || client->session_id_len == 0u) {
+        return NETNOX_RETURN_BAD_PARAM;
+    }
+
+    if(netnox_ssh_payload_append_string(pubkey_blob, &pubkey_blob_len, (uint32_t)sizeof(pubkey_blob),
+                                        (const uint8_t *)NETNOX_SSH_KEYALG_ED25519,
+                                        (uint32_t)strlen(NETNOX_SSH_KEYALG_ED25519)) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(netnox_ssh_payload_append_string(pubkey_blob, &pubkey_blob_len, (uint32_t)sizeof(pubkey_blob),
+                                        client->ed25519_public_key,
+                                        (uint32_t)sizeof(client->ed25519_public_key)) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+
+    if(netnox_ssh_payload_append_u8(payload, &payload_len, (uint32_t)sizeof(payload), NETNOX_SSH_MSG_USERAUTH_REQUEST) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(netnox_ssh_payload_append_string(payload, &payload_len, (uint32_t)sizeof(payload),
+                                        (const uint8_t *)client->username, (uint32_t)strlen(client->username)) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(netnox_ssh_payload_append_string(payload, &payload_len, (uint32_t)sizeof(payload),
+                                        (const uint8_t *)NETNOX_SSH_SERVICE_CONNECTION, (uint32_t)strlen(NETNOX_SSH_SERVICE_CONNECTION)) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(netnox_ssh_payload_append_string(payload, &payload_len, (uint32_t)sizeof(payload),
+                                        (const uint8_t *)NETNOX_SSH_AUTH_METHOD_PUBLICKEY, (uint32_t)strlen(NETNOX_SSH_AUTH_METHOD_PUBLICKEY)) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(netnox_ssh_payload_append_u8(payload, &payload_len, (uint32_t)sizeof(payload), 1u) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(netnox_ssh_payload_append_string(payload, &payload_len, (uint32_t)sizeof(payload),
+                                        (const uint8_t *)NETNOX_SSH_KEYALG_ED25519, (uint32_t)strlen(NETNOX_SSH_KEYALG_ED25519)) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(netnox_ssh_payload_append_string(payload, &payload_len, (uint32_t)sizeof(payload),
+                                        pubkey_blob, pubkey_blob_len) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    req_no_sig_len = payload_len;
+
+    if(netnox_ssh_payload_append_string(to_sign, &to_sign_len, (uint32_t)sizeof(to_sign),
+                                        client->session_id, client->session_id_len) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(to_sign_len + req_no_sig_len > (uint32_t)sizeof(to_sign)) {
+        return NETNOX_RETURN_FAILED;
+    }
+    memcpy(&to_sign[to_sign_len], payload, req_no_sig_len);
+    to_sign_len += req_no_sig_len;
+
+    if(noxtls_ed25519_sign(client->ed25519_private_key,
+                           to_sign,
+                           to_sign_len,
+                           signature) != NOXTLS_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+
+    if(netnox_ssh_payload_append_string(sig_blob, &sig_blob_len, (uint32_t)sizeof(sig_blob),
+                                        (const uint8_t *)NETNOX_SSH_KEYALG_ED25519,
+                                        (uint32_t)strlen(NETNOX_SSH_KEYALG_ED25519)) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(netnox_ssh_payload_append_string(sig_blob, &sig_blob_len, (uint32_t)sizeof(sig_blob),
+                                        signature, (uint32_t)sizeof(signature)) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(netnox_ssh_payload_append_string(payload, &payload_len, (uint32_t)sizeof(payload),
+                                        sig_blob, sig_blob_len) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    return netnox_ssh_send_packet(client, payload, payload_len);
+}
+
+static netnox_return_t netnox_ssh_wait_userauth_result(netnox_ssh_client_t * client)
+{
+    uint8_t payload[512];
+    uint32_t payload_len = 0u;
+
+    if(client == NULL) {
+        return NETNOX_RETURN_BAD_PARAM;
+    }
+    if(netnox_ssh_wait_for_message(client,
+                                   NETNOX_SSH_MSG_USERAUTH_SUCCESS,
+                                   NETNOX_SSH_MSG_USERAUTH_FAILURE,
+                                   payload,
+                                   (uint32_t)sizeof(payload),
+                                   &payload_len) != NETNOX_RETURN_SUCCESS) {
+        SSH_DEBUG("authenticate: wait_for_message failed (timeout or recv error)");
+        return NETNOX_RETURN_FAILED;
+    }
+    if(payload_len == 0u) {
+        SSH_DEBUG("authenticate: empty payload");
+        return NETNOX_RETURN_FAILED;
+    }
+    SSH_DEBUG("authenticate: got message type %u", (unsigned)payload[0]);
+    if(payload[0] == NETNOX_SSH_MSG_USERAUTH_SUCCESS) {
+        client->authenticated = 1u;
+        return NETNOX_RETURN_SUCCESS;
+    }
+    if(payload[0] == NETNOX_SSH_MSG_USERAUTH_FAILURE) {
+        SSH_DEBUG("authenticate: server sent USERAUTH_FAILURE");
+        return NETNOX_RETURN_AUTH_REJECTED;
+    }
+    SSH_DEBUG("authenticate: unexpected message type %u", (unsigned)payload[0]);
+    return NETNOX_RETURN_FAILED;
+}
+
+/**
  * @brief Send session channel open request.
  * @internal
  */
@@ -1898,6 +2306,21 @@ netnox_return_t netnox_ssh_client_set_password(netnox_ssh_client_t * client, con
     return netnox_ssh_copy_string(client->password, (uint16_t)sizeof(client->password), password);
 }
 
+netnox_return_t netnox_ssh_client_set_ed25519_private_key(netnox_ssh_client_t * client,
+                                                          const uint8_t private_key[32])
+{
+    if(client == NULL || private_key == NULL) {
+        return NETNOX_RETURN_BAD_PARAM;
+    }
+    memcpy(client->ed25519_private_key, private_key, 32u);
+    if(noxtls_ed25519_public_key(client->ed25519_private_key, client->ed25519_public_key) != NOXTLS_RETURN_SUCCESS) {
+        client->has_ed25519_key = 0u;
+        return NETNOX_RETURN_FAILED;
+    }
+    client->has_ed25519_key = 1u;
+    return NETNOX_RETURN_SUCCESS;
+}
+
 netnox_return_t netnox_ssh_client_connect(netnox_ssh_client_t * client)
 {
     uint8_t banner_index = 0u;
@@ -1947,10 +2370,29 @@ const char * netnox_ssh_client_get_server_ident(const netnox_ssh_client_t * clie
     return client->server_ident;
 }
 
+netnox_return_t netnox_ssh_client_get_server_host_key_fingerprint(const netnox_ssh_client_t * client,
+                                                                  uint8_t * out_fingerprint,
+                                                                  uint32_t * inout_len)
+{
+    if(client == NULL || out_fingerprint == NULL || inout_len == NULL) {
+        return NETNOX_RETURN_BAD_PARAM;
+    }
+    if(client->server_host_key_ready == 0u) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(*inout_len < NETNOX_SSH_HOST_KEY_FINGERPRINT_LEN) {
+        *inout_len = NETNOX_SSH_HOST_KEY_FINGERPRINT_LEN;
+        return NETNOX_RETURN_BAD_PARAM;
+    }
+    memcpy(out_fingerprint, client->server_host_key_fingerprint, NETNOX_SSH_HOST_KEY_FINGERPRINT_LEN);
+    *inout_len = NETNOX_SSH_HOST_KEY_FINGERPRINT_LEN;
+    return NETNOX_RETURN_SUCCESS;
+}
+
 netnox_return_t netnox_ssh_client_authenticate(netnox_ssh_client_t * client)
 {
-    uint8_t payload[512];
-    uint32_t payload_len = 0u;
+    netnox_return_t auth_rc = NETNOX_RETURN_FAILED;
+    uint8_t attempted = 0u;
 
     SSH_DEBUG("authenticate: connected=%u kex=%u key_complete=%u user=%s",
               (unsigned)client->connected,
@@ -1974,35 +2416,43 @@ netnox_return_t netnox_ssh_client_authenticate(netnox_ssh_client_t * client)
         }
         SSH_DEBUG("authenticate: ssh-userauth service accepted");
     }
-    SSH_DEBUG("authenticate: sending password userauth request");
-    if(netnox_ssh_send_userauth_password(client) != NETNOX_RETURN_SUCCESS) {
-        SSH_DEBUG("authenticate: send_userauth_password failed");
+    if(client->has_ed25519_key != 0u) {
+        attempted = 1u;
+        SSH_DEBUG("authenticate: sending publickey(ed25519) userauth request");
+        if(netnox_ssh_send_userauth_publickey_ed25519(client) != NETNOX_RETURN_SUCCESS) {
+            SSH_DEBUG("authenticate: send_userauth_publickey_ed25519 failed");
+            return NETNOX_RETURN_FAILED;
+        }
+        auth_rc = netnox_ssh_wait_userauth_result(client);
+        if(auth_rc == NETNOX_RETURN_SUCCESS) {
+            return NETNOX_RETURN_SUCCESS;
+        }
+        if(auth_rc != NETNOX_RETURN_AUTH_REJECTED) {
+            return NETNOX_RETURN_FAILED;
+        }
+        SSH_DEBUG("authenticate: publickey rejected, trying next method if available");
+    }
+    if(client->password[0] != '\0') {
+        attempted = 1u;
+        SSH_DEBUG("authenticate: sending password userauth request");
+        if(netnox_ssh_send_userauth_password(client) != NETNOX_RETURN_SUCCESS) {
+            SSH_DEBUG("authenticate: send_userauth_password failed");
+            return NETNOX_RETURN_FAILED;
+        }
+        auth_rc = netnox_ssh_wait_userauth_result(client);
+        if(auth_rc == NETNOX_RETURN_SUCCESS) {
+            return NETNOX_RETURN_SUCCESS;
+        }
+        if(auth_rc == NETNOX_RETURN_AUTH_REJECTED) {
+            return NETNOX_RETURN_AUTH_REJECTED;
+        }
         return NETNOX_RETURN_FAILED;
     }
-    if(netnox_ssh_wait_for_message(client,
-                                   NETNOX_SSH_MSG_USERAUTH_SUCCESS,
-                                   NETNOX_SSH_MSG_USERAUTH_FAILURE,
-                                   payload,
-                                   (uint32_t)sizeof(payload),
-                                   &payload_len) != NETNOX_RETURN_SUCCESS) {
-        SSH_DEBUG("authenticate: wait_for_message failed (timeout or recv error)");
-        return NETNOX_RETURN_FAILED;
+    if(attempted == 0u) {
+        SSH_DEBUG("authenticate: no configured auth method (need ed25519 key and/or password)");
+        return NETNOX_RETURN_BAD_PARAM;
     }
-    if(payload_len == 0u) {
-        SSH_DEBUG("authenticate: empty payload");
-        return NETNOX_RETURN_FAILED;
-    }
-    SSH_DEBUG("authenticate: got message type %u", (unsigned)payload[0]);
-    if(payload[0] == NETNOX_SSH_MSG_USERAUTH_SUCCESS) {
-        client->authenticated = 1u;
-        return NETNOX_RETURN_SUCCESS;
-    }
-    if(payload[0] == NETNOX_SSH_MSG_USERAUTH_FAILURE) {
-        SSH_DEBUG("authenticate: server sent USERAUTH_FAILURE");
-        return NETNOX_RETURN_AUTH_REJECTED;
-    }
-    SSH_DEBUG("authenticate: unexpected message type %u", (unsigned)payload[0]);
-    return NETNOX_RETURN_FAILED;
+    return NETNOX_RETURN_AUTH_REJECTED;
 }
 
 netnox_return_t netnox_ssh_client_open_session(netnox_ssh_client_t * client)
@@ -2313,6 +2763,39 @@ netnox_return_t netnox_ssh_client_send_data(netnox_ssh_client_t * client,
     return netnox_ssh_send_packet(client, payload, payload_len);
 }
 
+netnox_return_t netnox_ssh_client_send_keepalive(netnox_ssh_client_t * client)
+{
+    uint8_t payload[1u + 4u];
+    uint32_t payload_len = 0u;
+
+    if(client == NULL) {
+        return NETNOX_RETURN_BAD_PARAM;
+    }
+    if(client->connected == 0u || client->key_exchange_complete == 0u) {
+        return NETNOX_RETURN_BAD_PARAM;
+    }
+    if(netnox_ssh_payload_append_u8(payload, &payload_len, (uint32_t)sizeof(payload), NETNOX_SSH_MSG_IGNORE) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    if(netnox_ssh_payload_append_u32(payload, &payload_len, (uint32_t)sizeof(payload), 0u) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    SSH_DEBUG3("keepalive: sending SSH_MSG_IGNORE");
+    return netnox_ssh_send_packet(client, payload, payload_len);
+}
+
+netnox_return_t netnox_ssh_client_rekey(netnox_ssh_client_t * client)
+{
+    if(client == NULL) {
+        return NETNOX_RETURN_BAD_PARAM;
+    }
+    if(client->connected == 0u || client->key_exchange_complete == 0u) {
+        return NETNOX_RETURN_BAD_PARAM;
+    }
+    SSH_DEBUG("rekey: initiating key re-exchange");
+    return netnox_ssh_exchange_kexinit(client);
+}
+
 netnox_return_t netnox_ssh_client_recv_data(netnox_ssh_client_t * client,
                                             uint8_t * data,
                                             uint32_t * len)
@@ -2322,8 +2805,12 @@ netnox_return_t netnox_ssh_client_recv_data(netnox_ssh_client_t * client,
     uint32_t offset = 1u;
     uint32_t recipient_channel = 0u;
     uint32_t data_type_code = 0u;
+    uint8_t want_reply = 0u;
     const uint8_t * str_data = NULL;
     uint32_t str_len = 0u;
+    const uint8_t * req_type = NULL;
+    uint32_t req_type_len = 0u;
+    uint32_t exit_status = 0u;
     uint32_t copy_len = 0u;
 
     if(client == NULL || data == NULL || len == NULL || *len == 0u || *len > NETNOX_SSH_MAX_DATA_LEN) {
@@ -2338,6 +2825,13 @@ netnox_return_t netnox_ssh_client_recv_data(netnox_ssh_client_t * client,
             return NETNOX_RETURN_FAILED;
         }
         if(payload_len == 0u) {
+            continue;
+        }
+        if(payload[0] == NETNOX_SSH_MSG_KEXINIT) {
+            SSH_DEBUG("recv_data: handling server-initiated KEXINIT");
+            if(netnox_ssh_handle_server_kexinit(client, payload, payload_len) != NETNOX_RETURN_SUCCESS) {
+                return NETNOX_RETURN_FAILED;
+            }
             continue;
         }
 
@@ -2381,6 +2875,34 @@ netnox_return_t netnox_ssh_client_recv_data(netnox_ssh_client_t * client,
             return NETNOX_RETURN_SUCCESS;
         }
 
+        if(payload[0] == NETNOX_SSH_MSG_CHANNEL_REQUEST) {
+            offset = 1u;
+            if(netnox_ssh_payload_read_u32(payload, payload_len, &offset, &recipient_channel) != NETNOX_RETURN_SUCCESS) {
+                return NETNOX_RETURN_FAILED;
+            }
+            if(recipient_channel != client->local_channel_id) {
+                return NETNOX_RETURN_FAILED;
+            }
+            if(netnox_ssh_payload_read_string_view(payload, payload_len, &offset, &req_type, &req_type_len) != NETNOX_RETURN_SUCCESS) {
+                return NETNOX_RETURN_FAILED;
+            }
+            if(offset >= payload_len) {
+                return NETNOX_RETURN_FAILED;
+            }
+            want_reply = payload[offset++];
+            (void)want_reply;
+            if(req_type_len == (uint32_t)strlen("exit-status") &&
+               memcmp(req_type, "exit-status", req_type_len) == 0) {
+                if(netnox_ssh_payload_read_u32(payload, payload_len, &offset, &exit_status) != NETNOX_RETURN_SUCCESS) {
+                    return NETNOX_RETURN_FAILED;
+                }
+                client->remote_exit_status = exit_status;
+                client->remote_exit_status_valid = 1u;
+                SSH_DEBUG("recv_data: captured remote exit-status=%u", (unsigned)exit_status);
+            }
+            continue;
+        }
+
         if(payload[0] == NETNOX_SSH_MSG_CHANNEL_EOF) {
             /* Keep channel open state until CLOSE; EOF means no more remote payload data. */
             *len = 0u;
@@ -2393,6 +2915,19 @@ netnox_return_t netnox_ssh_client_recv_data(netnox_ssh_client_t * client,
             return NETNOX_RETURN_SUCCESS;
         }
     }
+}
+
+netnox_return_t netnox_ssh_client_get_remote_exit_status(const netnox_ssh_client_t * client,
+                                                         uint32_t * out_status)
+{
+    if(client == NULL || out_status == NULL) {
+        return NETNOX_RETURN_BAD_PARAM;
+    }
+    if(client->remote_exit_status_valid == 0u) {
+        return NETNOX_RETURN_FAILED;
+    }
+    *out_status = client->remote_exit_status;
+    return NETNOX_RETURN_SUCCESS;
 }
 
 netnox_return_t netnox_ssh_client_close(netnox_ssh_client_t * client)
@@ -2413,6 +2948,13 @@ netnox_return_t netnox_ssh_client_close(netnox_ssh_client_t * client)
     client->local_window_size = 0u;
     client->remote_window_size = 0u;
     client->remote_max_packet_size = 0u;
+    client->server_host_key_blob_len = 0u;
+    client->server_host_key_ready = 0u;
+    memset(client->ed25519_private_key, 0, sizeof(client->ed25519_private_key));
+    memset(client->ed25519_public_key, 0, sizeof(client->ed25519_public_key));
+    client->has_ed25519_key = 0u;
+    client->remote_exit_status_valid = 0u;
+    client->remote_exit_status = 0u;
     client->server_ident[0] = '\0';
     return NETNOX_RETURN_SUCCESS;
 }

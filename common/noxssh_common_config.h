@@ -62,6 +62,9 @@
 #ifndef NETNOX_SSH_MAX_PASSWORD_LEN
 #define NETNOX_SSH_MAX_PASSWORD_LEN (128u)
 #endif
+#ifndef NETNOX_SSH_MAX_HOST_KEY_BLOB_LEN
+#define NETNOX_SSH_MAX_HOST_KEY_BLOB_LEN (2048u)
+#endif
 
 /* KEX algorithm offers / requirements */
 #ifndef NETNOX_SSH_KEX_ALG_LIST

@@ -61,6 +61,8 @@ typedef struct netnox_interface_s netnox_interface_t;
 
 /** @brief SSH message number for service request. */
 #define NETNOX_SSH_MSG_SERVICE_REQUEST (5u)
+/** @brief SSH message number for ignore/no-op packets. */
+#define NETNOX_SSH_MSG_IGNORE (2u)
 /** @brief SSH message number for service accept. */
 #define NETNOX_SSH_MSG_SERVICE_ACCEPT (6u)
 /** @brief SSH message number for key exchange initialization. */
@@ -104,12 +106,18 @@ typedef struct netnox_interface_s netnox_interface_t;
 #define NETNOX_SSH_SERVICE_CONNECTION "ssh-connection"
 /** @brief Userauth method name for password (RFC 4252). */
 #define NETNOX_SSH_AUTH_METHOD_PASSWORD "password"
+/** @brief Userauth method name for public key (RFC 4252). */
+#define NETNOX_SSH_AUTH_METHOD_PUBLICKEY "publickey"
+/** @brief Public key algorithm name for Ed25519. */
+#define NETNOX_SSH_KEYALG_ED25519 "ssh-ed25519"
 /** @brief Channel type for session channels (RFC 4254). */
 #define NETNOX_SSH_CHANNEL_TYPE_SESSION "session"
 /** @brief Channel request type for exec. */
 #define NETNOX_SSH_CHANNEL_REQ_EXEC "exec"
 /** @brief Channel request type for shell. */
 #define NETNOX_SSH_CHANNEL_REQ_SHELL "shell"
+/** @brief SHA-256 fingerprint size in bytes. */
+#define NETNOX_SSH_HOST_KEY_FINGERPRINT_LEN (32u)
 
 /** Callback to send data over the transport (socket/stream). Returns bytes sent or negative on error. */
 typedef int32_t (*netnox_ssh_transport_send_t)(void * user_data, const uint8_t * data, uint32_t len);
@@ -129,6 +137,9 @@ typedef struct
     char username[NETNOX_SSH_MAX_USERNAME_LEN + 1u];
     char host[NETNOX_SSH_MAX_HOST_LEN + 1u];
     char password[NETNOX_SSH_MAX_PASSWORD_LEN + 1u];
+    uint8_t ed25519_private_key[32];
+    uint8_t ed25519_public_key[32];
+    uint8_t has_ed25519_key;
 
     uint16_t port;
     uint8_t connected;
@@ -146,6 +157,10 @@ typedef struct
     uint8_t kexinit_server_payload[NETNOX_SSH_MAX_KEXINIT_PAYLOAD_LEN];
     uint32_t kexinit_client_payload_len;
     uint32_t kexinit_server_payload_len;
+    uint8_t server_host_key_blob[NETNOX_SSH_MAX_HOST_KEY_BLOB_LEN];
+    uint32_t server_host_key_blob_len;
+    uint8_t server_host_key_fingerprint[NETNOX_SSH_HOST_KEY_FINGERPRINT_LEN];
+    uint8_t server_host_key_ready;
     uint8_t session_id[32];
     uint8_t session_id_len;
     uint8_t shared_secret_raw[32];
@@ -161,6 +176,8 @@ typedef struct
     uint8_t s2c_counter[16];
     uint8_t pending_newkeys[32];
     uint32_t pending_newkeys_len;
+    uint8_t remote_exit_status_valid;
+    uint32_t remote_exit_status;
 } netnox_ssh_client_t;
 
 extern netnox_return_t netnox_ssh_client_init(netnox_ssh_client_t * client,
@@ -177,8 +194,13 @@ extern netnox_return_t netnox_ssh_client_set_target(netnox_ssh_client_t * client
                                                     const char * host);
 extern netnox_return_t netnox_ssh_client_set_password(netnox_ssh_client_t * client,
                                                       const char * password);
+extern netnox_return_t netnox_ssh_client_set_ed25519_private_key(netnox_ssh_client_t * client,
+                                                                 const uint8_t private_key[32]);
 extern netnox_return_t netnox_ssh_client_connect(netnox_ssh_client_t * client);
 extern const char * netnox_ssh_client_get_server_ident(const netnox_ssh_client_t * client);
+extern netnox_return_t netnox_ssh_client_get_server_host_key_fingerprint(const netnox_ssh_client_t * client,
+                                                                         uint8_t * out_fingerprint,
+                                                                         uint32_t * inout_len);
 extern netnox_return_t netnox_ssh_client_authenticate(netnox_ssh_client_t * client);
 extern netnox_return_t netnox_ssh_client_open_session(netnox_ssh_client_t * client);
 extern netnox_return_t netnox_ssh_client_exec(netnox_ssh_client_t * client,
@@ -189,9 +211,13 @@ extern netnox_return_t netnox_ssh_client_request_shell(netnox_ssh_client_t * cli
 extern netnox_return_t netnox_ssh_client_send_data(netnox_ssh_client_t * client,
                                                    const uint8_t * data,
                                                    uint32_t len);
+extern netnox_return_t netnox_ssh_client_send_keepalive(netnox_ssh_client_t * client);
+extern netnox_return_t netnox_ssh_client_rekey(netnox_ssh_client_t * client);
 extern netnox_return_t netnox_ssh_client_recv_data(netnox_ssh_client_t * client,
                                                    uint8_t * data,
                                                    uint32_t * len);
+extern netnox_return_t netnox_ssh_client_get_remote_exit_status(const netnox_ssh_client_t * client,
+                                                                uint32_t * out_status);
 extern netnox_return_t netnox_ssh_client_close(netnox_ssh_client_t * client);
 
 #endif
