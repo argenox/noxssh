@@ -149,6 +149,11 @@ static netnox_return_t netnox_ssh_verify_server_host_key_signature(const uint8_t
                                                                     const uint8_t * exchange_hash,
                                                                     uint32_t exchange_hash_len);
 static netnox_return_t netnox_ssh_wait_userauth_result(netnox_ssh_client_t * client);
+static netnox_return_t netnox_ssh_payload_read_string_view(const uint8_t * payload,
+                                                           uint32_t payload_len,
+                                                           uint32_t * offset,
+                                                           const uint8_t ** out_data,
+                                                           uint32_t * out_len);
 
 /**
  * @brief Compute HMAC-SHA256(key, data) into mac_out (32 bytes).
@@ -1554,12 +1559,12 @@ static netnox_return_t netnox_ssh_send_packet(netnox_ssh_client_t * client,
         netnox_ssh_debug_hex("send c2s_counter (IV for this packet)", client->c2s_counter, NETNOX_SSH_AES_BLOCK_LEN);
         /* RFC 4253 sec 6.3: encrypt packet_length || padding_length || payload || padding.
          * RFC 4344 SDCTR: IV as 16-byte big-endian counter; we increment LSB (byte 15) up. */
-        aes_rc = aes_encrypt_ctr(client->c2s_key,
+        aes_rc = noxtls_aes_encrypt_ctr(client->c2s_key,
                                  plain,
                                  plain_len,
                                  client->c2s_counter,
                                  enc,
-                                 AES_128_BIT);
+                                 NOXTLS_AES_128_BIT);
         if(aes_rc != NOXTLS_RETURN_SUCCESS) {
             SSH_DEBUG("send_packet(enc): AES encrypt failed");
             return NETNOX_RETURN_FAILED;
@@ -1679,12 +1684,12 @@ static netnox_return_t netnox_ssh_recv_packet(netnox_ssh_client_t * client,
         }
         netnox_ssh_debug_hex("recv s2c_counter (IV for this packet)", client->s2c_counter, NETNOX_SSH_AES_BLOCK_LEN);
         netnox_ssh_debug_hex_full("recv first block (ciphertext)", enc, NETNOX_SSH_AES_BLOCK_LEN, 16u);
-        aes_rc = aes_encrypt_ctr(client->s2c_key,
+        aes_rc = noxtls_aes_encrypt_ctr(client->s2c_key,
                                  enc,
                                  NETNOX_SSH_AES_BLOCK_LEN,
                                  client->s2c_counter,
                                  plain,
-                                 AES_128_BIT);
+                                 NOXTLS_AES_128_BIT);
         if(aes_rc != NOXTLS_RETURN_SUCCESS) {
             SSH_DEBUG("recv_packet(enc): first block decrypt failed");
             return NETNOX_RETURN_FAILED;
@@ -1704,12 +1709,12 @@ static netnox_return_t netnox_ssh_recv_packet(netnox_ssh_client_t * client,
             SSH_DEBUG("recv_packet(enc): recv rest of packet failed");
             return NETNOX_RETURN_FAILED;
         }
-        aes_rc = aes_encrypt_ctr(client->s2c_key,
+        aes_rc = noxtls_aes_encrypt_ctr(client->s2c_key,
                                  &enc[NETNOX_SSH_AES_BLOCK_LEN],
                                  plain_len - NETNOX_SSH_AES_BLOCK_LEN,
                                  client->s2c_counter,
                                  &plain[NETNOX_SSH_AES_BLOCK_LEN],
-                                 AES_128_BIT);
+                                 NOXTLS_AES_128_BIT);
         if(aes_rc != NOXTLS_RETURN_SUCCESS) {
             SSH_DEBUG("recv_packet(enc): second chunk decrypt failed");
             return NETNOX_RETURN_FAILED;
