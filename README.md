@@ -3,11 +3,12 @@
 [![Build](https://github.com/argenox/noxssh/actions/workflows/build.yml/badge.svg)](https://github.com/argenox/noxssh/actions/workflows/build.yml)
 [![Release on tag](https://github.com/argenox/noxssh/actions/workflows/release-on-tag.yml/badge.svg)](https://github.com/argenox/noxssh/actions/workflows/release-on-tag.yml)
 
-**NoxSSH** is a lightweight SSH client built on a standalone SSH common protocol layer and NoxTLS cryptographic primitives. It provides a simple CLI for connecting to SSH servers, with password authentication and support for both interactive sessions and one-shot remote command execution.
+**NoxSSH** is a lightweight SSH client built on a standalone SSH common protocol layer and [NoxTLS](https://noxtls.com) cryptographic primitives. It provides a simple CLI for connecting to SSH servers, with password authentication and support for both interactive sessions and one-shot remote command execution.
 
 | | |
 |---|---|
-| **Version** | 0.1.0 |
+| **Version** | 0.2.25 |
+| **NoxTLS Version** | 0.2.25 |
 | **Language** | C99 |
 | **Build** | CMake 3.16+ |
 
@@ -43,6 +44,13 @@ From the repository root:
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
+
+There is also a build script for convenience
+```bash
+sudo chmod +x build.ssh
+./build.sh
+```
+
 
 The `noxssh` executable is produced in `bin/` (or `build/bin/` depending on your generator).
 
