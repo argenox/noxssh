@@ -45,14 +45,31 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-There is also a build script for convenience
+There is also a build script for convenience:
+
 ```bash
-sudo chmod +x build.ssh
+chmod +x build.sh
 ./build.sh
 ```
 
-
 The `noxssh` executable is produced in `bin/` (or `build/bin/` depending on your generator).
+
+### Debian package
+
+On Debian/Ubuntu you can build a `.deb` package locally:
+
+```bash
+chmod +x packaging/debian/build-deb.sh
+./packaging/debian/build-deb.sh
+```
+
+Packages are written to `dist/debian/` (for example `noxssh_0.2.25_amd64.deb`). Install with:
+
+```bash
+sudo dpkg -i dist/debian/noxssh_*_amd64.deb
+```
+
+Tagged releases (`v*`) also publish Linux `.deb` assets alongside the tarballs (`noxssh-linux-x86_64-v<version>.deb`, `noxssh-linux-arm64-v<version>.deb`).
 
 ### Usage
 

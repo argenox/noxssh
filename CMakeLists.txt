@@ -1,6 +1,21 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(noxssh VERSION 0.2.25 LANGUAGES C)
+file(READ "${CMAKE_SOURCE_DIR}/client/version.h" _noxssh_version_h)
+string(REGEX MATCH "NOXSSH_VERSION_STRING \"([^\"]+)\"" _ "${_noxssh_version_h}")
+if(NOT CMAKE_MATCH_1)
+    message(FATAL_ERROR "Could not parse NOXSSH_VERSION_STRING from client/version.h")
+endif()
+set(NOXSSH_VERSION "${CMAKE_MATCH_1}")
+string(REPLACE "." ";" _noxssh_version_parts "${NOXSSH_VERSION}")
+list(LENGTH _noxssh_version_parts _noxssh_version_part_count)
+if(NOT _noxssh_version_part_count EQUAL 3)
+    message(FATAL_ERROR "Invalid NOXSSH_VERSION_STRING format: ${NOXSSH_VERSION}")
+endif()
+list(GET _noxssh_version_parts 0 _noxssh_version_major)
+list(GET _noxssh_version_parts 1 _noxssh_version_minor)
+list(GET _noxssh_version_parts 2 _noxssh_version_patch)
+
+project(noxssh VERSION ${_noxssh_version_major}.${_noxssh_version_minor}.${_noxssh_version_patch} LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -59,3 +74,27 @@ target_compile_definitions(netnox_ssh
         NOXTLS_FEATURE_AES_CTR=1
 )
 add_subdirectory(client)
+
+install(FILES
+    README.md
+    LICENSE.md
+    COPYING.md
+    DESTINATION share/doc/noxssh
+)
+
+if(UNIX AND NOT APPLE)
+    set(CPACK_GENERATOR "DEB")
+    set(CPACK_PACKAGE_NAME "noxssh")
+    set(CPACK_PACKAGE_VENDOR "Argenox Technologies LLC")
+    set(CPACK_PACKAGE_CONTACT "info@argenox.com")
+    set(CPACK_PACKAGE_VERSION "${NOXSSH_VERSION}")
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Lightweight SSH client built on NoxTLS")
+    set(CPACK_PACKAGE_DESCRIPTION
+        "NoxSSH is a lightweight SSH-2 client with password and Ed25519 public key authentication, host key verification, and OpenSSH-style configuration support.")
+    set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/COPYING.md")
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+    set(CPACK_DEBIAN_PACKAGE_SECTION "net")
+    set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
+    set(CPACK_DEBIAN_FILE_NAME "DEB-DEFAULT")
+    include(CPack)
+endif()

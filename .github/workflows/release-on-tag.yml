@@ -115,6 +115,18 @@ jobs:
           cmake -S . -B build -D CMAKE_BUILD_TYPE=Release
           cmake --build build --parallel
 
+      - name: Build Debian package
+        if: startsWith(matrix.artifact_suffix, 'linux-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build --target package
+          mkdir -p release-assets
+          VERSION="${{ needs.validate-tag.outputs.noxssh_version }}"
+          for deb in build/*.deb; do
+            cp "${deb}" "release-assets/noxssh-${{ matrix.artifact_suffix }}-v${VERSION}.deb"
+          done
+
       - name: Create release archives
         shell: bash
         run: |

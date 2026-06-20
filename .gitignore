@@ -1,6 +1,7 @@
 # Build outputs
 /bin/
 /build/
+/dist/
 /out/
 
 # CMake generated files

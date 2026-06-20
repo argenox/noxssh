@@ -14,9 +14,9 @@
 /** @brief Minor version number. */
 #define NOXSSH_VERSION_MINOR 2
 /** @brief Patch version number. */
-#define NOXSSH_VERSION_PATCH 25
+#define NOXSSH_VERSION_PATCH 26
 
 /** @brief Version string for display (e.g. "0.1.0"). */
-#define NOXSSH_VERSION_STRING "0.2.25"
+#define NOXSSH_VERSION_STRING "0.2.26"
 
 #endif /* NOXSSH_VERSION_H */

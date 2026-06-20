@@ -16,3 +16,5 @@ target_link_libraries(noxssh
 if(WIN32)
     target_link_libraries(noxssh PRIVATE ws2_32)
 endif()
+
+install(TARGETS noxssh RUNTIME DESTINATION bin)

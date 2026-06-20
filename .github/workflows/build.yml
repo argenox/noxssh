@@ -40,9 +40,24 @@ jobs:
       - name: Build
         run: cmake --build build
 
+      - name: Build Debian package
+        if: runner.os == 'Linux'
+        run: |
+          cmake --build build --target package
+          mkdir -p dist/debian
+          cp build/*.deb dist/debian/
+
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
           name: noxssh-${{ matrix.artifact_suffix }}
           path: bin/**
+          if-no-files-found: error
+
+      - name: Upload Debian package
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: noxssh-${{ matrix.artifact_suffix }}-deb
+          path: dist/debian/*.deb
           if-no-files-found: error
