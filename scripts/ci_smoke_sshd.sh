@@ -23,7 +23,7 @@ ssh-keygen -q -t ed25519 -N '' -f "$KEYDIR/id"
 sudo useradd -m -U -s /bin/sh "$USER_NAME"
 sudo install -d -m 700 -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.ssh"
 sudo install -m 600 -o "$USER_NAME" -g "$USER_NAME" "$KEYDIR/id.pub" "/home/$USER_NAME/.ssh/authorized_keys"
-sudo timeout 60s "$NOXSSHD" -p "$PORT" --host-key "$HOSTDIR/seed" >"$KEYDIR/server.log" 2>&1 &
+sudo env NETNOX_SSH_DEBUG=1 timeout 60s "$NOXSSHD" -p "$PORT" --host-key "$HOSTDIR/seed" >"$KEYDIR/server.log" 2>&1 &
 DAEMON_PID=$!
 sleep 1
 SSH_OPTS=(-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$KEYDIR/id" -p "$PORT")
@@ -34,6 +34,10 @@ OUT="$(printf 'printf ci_shell_ok; exit\n' | ssh -tt "${SSH_OPTS[@]}" "$USER_NAM
 if ssh "${SSH_OPTS[@]}" "no_such_noxssh_user@127.0.0.1" 'printf bad' >/dev/null 2>&1; then
   echo 'invalid account authenticated' >&2; exit 1
 fi
-OUT="$("$NOXSSH" --batch --strict-host-key-checking no -i "$KEYDIR/id" -p "$PORT" "$USER_NAME@127.0.0.1" 'printf ci_noxssh_ok')"
+if ! OUT="$("$NOXSSH" -d --batch --strict-host-key-checking no -i "$KEYDIR/id" -p "$PORT" "$USER_NAME@127.0.0.1" 'printf ci_noxssh_ok' 2>&1)"; then
+  echo "NoxSSH client failed: $OUT" >&2
+  cat "$KEYDIR/server.log" >&2
+  exit 1
+fi
 [[ "$OUT" == *ci_noxssh_ok* ]]
 echo 'ci_smoke_sshd: exec, PTY shell, invalid account, NoxSSH client passed'
