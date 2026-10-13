@@ -1,6 +1,6 @@
 # Linux server
 
-`noxsshd` is an opt-in Linux SSH server. It does not start automatically.
+`noxsshd` is an opt-in Linux SSH server. The packaged service is disabled by default.
 It binds to `127.0.0.1:2222` unless `-b` and `-p` are supplied. The
 MPUNoxV image can retain OpenSSH while this server is qualified.
 
@@ -24,6 +24,14 @@ mode `0600` using Linux `getrandom()`. The 32-byte seed is reused on future
 starts; back it up as a secret if clients pin the host identity. A supplied
 `--host-key` must be an absolute path under a directory owned by the daemon
 and not group/other writable. The server refuses an unsafe or malformed key.
+
+`noxsshd --check-user root` returns success only if root's account and
+`authorized_keys` currently permit an Ed25519 key. It does not create a host
+key or bind a socket. On the trusted UART console, run
+`noxsshd --print-host-public-key` to create or read the persistent host seed
+and print only its OpenSSH public key. `ssh-keygen -lf -` can display its
+fingerprint, and the public key can be pinned in the client's `known_hosts`
+before the first network connection. Never transfer the host seed itself.
 
 The current server supports one session channel per connection, remote
 commands, a shell, optional PTY, terminal resize, stdin/stdout/stderr,

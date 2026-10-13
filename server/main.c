@@ -14,7 +14,30 @@
 #include <sys/random.h>
 #endif
 #include "daemon_runtime.h"
+#include "auth_posix.h"
+#include "../noxtls/noxtls-lib/pkc/ed25519/noxtls_ed25519.h"
 #include "../client/version.h"
+
+/* 4 + 11 + 4 + 32 bytes, encoded as 68 base64 characters. */
+static int print_host_public_key(const uint8_t seed[32])
+{
+    static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    static const uint8_t prefix[19] = {0,0,0,11,'s','s','h','-','e','d','2','5','5','1','9',0,0,0,32};
+    uint8_t blob[51];
+    char encoded[69];
+    size_t i, o = 0u;
+    memcpy(blob, prefix, sizeof(prefix));
+    if(noxtls_ed25519_public_key(seed, blob + 19u) != NOXTLS_RETURN_SUCCESS) return -1;
+    for(i = 0u; i < sizeof(blob); i += 3u) {
+        uint32_t x = ((uint32_t)blob[i] << 16) | ((uint32_t)blob[i+1u] << 8) | blob[i+2u];
+        encoded[o++] = alphabet[(x >> 18) & 63u];
+        encoded[o++] = alphabet[(x >> 12) & 63u];
+        encoded[o++] = alphabet[(x >> 6) & 63u];
+        encoded[o++] = alphabet[x & 63u];
+    }
+    encoded[o] = '\0';
+    return printf("ssh-ed25519 %s noxsshd-host\n", encoded) < 0 ? -1 : 0;
+}
 
 static int random_seed(uint8_t seed[32])
 {
@@ -86,12 +109,13 @@ int main(int argc, char **argv)
 {
     const char *bind_host = "127.0.0.1";
     const char *key_path = "/etc/noxssh/host_ed25519_seed";
+    const char *check_user = NULL;
     uint8_t seed[32];
     uint16_t port = 2222u;
-    int i;
+    int i, print_public = 0;
     for(i = 1; i < argc; i++) {
         if(!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
-            fprintf(stderr, "noxsshd " NOXSSH_VERSION_STRING "\nUsage: %s [-b bind] [-p port] [--host-key absolute-path]\nPublic-key authentication only; binds 127.0.0.1 by default.\n", argv[0]);
+            fprintf(stderr, "noxsshd " NOXSSH_VERSION_STRING "\nUsage: %s [-b bind] [-p port] [--host-key absolute-path] [--check-user account | --print-host-public-key]\nPublic-key authentication only; binds 127.0.0.1 by default.\n", argv[0]);
             return 0;
         } else if(!strcmp(argv[i], "-b") && i + 1 < argc) bind_host = argv[++i];
         else if(!strcmp(argv[i], "-p") && i + 1 < argc) {
@@ -99,11 +123,20 @@ int main(int argc, char **argv)
             if(*end || value < 1u || value > 65535u) return 2;
             port = (uint16_t)value;
         } else if(!strcmp(argv[i], "--host-key") && i + 1 < argc) key_path = argv[++i];
+        else if(!strcmp(argv[i], "--check-user") && i + 1 < argc) check_user = argv[++i];
+        else if(!strcmp(argv[i], "--print-host-public-key")) print_public = 1;
         else { fprintf(stderr, "noxsshd: invalid option\n"); return 2; }
     }
+    if(check_user && print_public) return 2;
+    if(check_user) return noxsshd_authorized_user_ready(check_user) ? 0 : 1;
     if(key_path[0] != '/' || host_seed(key_path, seed)) {
         fprintf(stderr, "noxsshd: secure persistent host key unavailable at %s\n", key_path);
         return 1;
+    }
+    if(print_public) {
+        i = print_host_public_key(seed);
+        memset(seed, 0, sizeof(seed));
+        return i == 0 ? 0 : 1;
     }
     i = noxsshd_listen_loop(bind_host, port, seed);
     memset(seed, 0, sizeof(seed));

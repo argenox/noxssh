@@ -43,7 +43,7 @@ static int decode_blob(const char *src, size_t len, uint8_t out[51])
     return n == 51u && memcmp(out, "\0\0\0\13ssh-ed25519\0\0\0\040", 19u) == 0;
 }
 
-int noxsshd_authorized_ed25519(void * unused, const char * username, const uint8_t key[32])
+static int authorized_user_key(const char * username, const uint8_t * key)
 {
     struct passwd pwd, *pw = NULL;
     char pwbuf[16384], path[4096], line[8192];
@@ -51,10 +51,10 @@ int noxsshd_authorized_ed25519(void * unused, const char * username, const uint8
     FILE *f;
     int fd, ok = 0;
     size_t home_len;
-    (void)unused;
-    if(!username || !key || strchr(username, '/') || strchr(username, '\\') ||
+    if(!username || !username[0] || strchr(username, '/') || strchr(username, '\\') ||
        getpwnam_r(username, &pwd, pwbuf, sizeof(pwbuf), &pw) != 0 || !pw ||
-       !pw->pw_dir || !pw->pw_shell || strstr(pw->pw_shell, "nologin") || strstr(pw->pw_shell, "false")) return 0;
+       !pw->pw_dir || !pw->pw_dir[0] || !pw->pw_shell || !pw->pw_shell[0] ||
+       strstr(pw->pw_shell, "nologin") || strstr(pw->pw_shell, "false")) return 0;
     home_len = strlen(pw->pw_dir);
     if(home_len + sizeof("/.ssh/authorized_keys") > sizeof(path)) return 0;
     if(stat(pw->pw_dir, &st) || !S_ISDIR(st.st_mode) || (st.st_mode & 022) ||
@@ -78,8 +78,19 @@ int noxsshd_authorized_ed25519(void * unused, const char * username, const uint8
         blob = alg + 11;
         while(*blob == ' ' || *blob == '\t') blob++;
         len = strcspn(blob, " \t\r\n");
-        if(decode_blob(blob, len, decoded) && memcmp(decoded + 19, key, 32u) == 0) { ok = 1; break; }
+        if(decode_blob(blob, len, decoded) && (!key || memcmp(decoded + 19, key, 32u) == 0)) { ok = 1; break; }
     }
     fclose(f);
     return ok;
+}
+
+int noxsshd_authorized_ed25519(void * unused, const char * username, const uint8_t key[32])
+{
+    (void)unused;
+    return key ? authorized_user_key(username, key) : 0;
+}
+
+int noxsshd_authorized_user_ready(const char * username)
+{
+    return authorized_user_key(username, NULL);
 }

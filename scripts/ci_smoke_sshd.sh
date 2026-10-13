@@ -29,6 +29,22 @@ echo "ci_smoke_sshd: account setup $(date -u +%FT%TZ)"
 sudo useradd -m -U -s /bin/sh "$USER_NAME"
 sudo install -d -m 700 -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.ssh"
 sudo install -m 600 -o "$USER_NAME" -g "$USER_NAME" "$KEYDIR/id.pub" "/home/$USER_NAME/.ssh/authorized_keys"
+echo "ci_smoke_sshd: read-only user preflight $(date -u +%FT%TZ)"
+sudo "$NOXSSHD" --check-user "$USER_NAME"
+if sudo "$NOXSSHD" --check-user no_such_noxssh_user; then echo 'missing account passed preflight' >&2; exit 1; fi
+sudo chmod 666 "/home/$USER_NAME/.ssh/authorized_keys"
+if sudo "$NOXSSHD" --check-user "$USER_NAME"; then echo 'writable key file passed preflight' >&2; exit 1; fi
+sudo chmod 600 "/home/$USER_NAME/.ssh/authorized_keys"
+printf 'ssh-ed25519 AAAA invalid\n' | sudo tee "/home/$USER_NAME/.ssh/authorized_keys" >/dev/null
+if sudo "$NOXSSHD" --check-user "$USER_NAME"; then echo 'malformed key passed preflight' >&2; exit 1; fi
+sudo install -m 600 -o "$USER_NAME" -g "$USER_NAME" "$KEYDIR/id.pub" "/home/$USER_NAME/.ssh/authorized_keys"
+sudo "$NOXSSHD" --check-user "$USER_NAME"
+echo "ci_smoke_sshd: persistent public host key $(date -u +%FT%TZ)"
+HOST_PUB1="$(sudo "$NOXSSHD" --print-host-public-key --host-key "$HOSTDIR/seed")"
+HOST_PUB2="$(sudo "$NOXSSHD" --print-host-public-key --host-key "$HOSTDIR/seed")"
+[[ "$HOST_PUB1" == "$HOST_PUB2" && "$HOST_PUB1" == ssh-ed25519\ * ]]
+printf '%s\n' "$HOST_PUB1" | ssh-keygen -lf - >/dev/null
+[[ "$(sudo stat -c '%a' "$HOSTDIR/seed")" == 600 ]]
 echo "ci_smoke_sshd: daemon start $(date -u +%FT%TZ)"
 sudo env NETNOX_SSH_DEBUG=1 timeout 180s "$NOXSSHD" -p "$PORT" --host-key "$HOSTDIR/seed" >"$KEYDIR/server.log" 2>&1 &
 DAEMON_PID=$!
