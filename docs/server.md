@@ -25,6 +25,24 @@ starts; back it up as a secret if clients pin the host identity. A supplied
 `--host-key` must be an absolute path under a directory owned by the daemon
 and not group/other writable. The server refuses an unsafe or malformed key.
 
+The server opens and validates the parent directory descriptor once, then uses
+descriptor-relative seed reads, exclusive creation and failure cleanup. Directory
+fsync uses that same descriptor, so replacing the parent pathname after validation
+cannot redirect these operations. Parent and seed final-component symlinks are
+refused. Seed ownership, private permissions and the existing 32-byte format are
+preserved. A directory-fsync failure returns failure while retaining the complete
+seed; a later invocation reuses it rather than silently changing host identity.
+
+Focused synthetic fixtures exercise directory replacement, existing-key reuse,
+creation, cleanup and injected I/O failures without using real keys or a daemon:
+
+```sh
+python3 scripts/test_host_seed_dirfd.py
+```
+
+This compiles only the actual seed functions with `-Wall -Wextra -Werror` in a
+temporary fixture directory. It does not replace full server, CI or target testing.
+
 `noxsshd --check-user root` returns success only if root's account and
 `authorized_keys` currently permit an Ed25519 key. It does not create a host
 key or bind a socket. On the trusted UART console, run
