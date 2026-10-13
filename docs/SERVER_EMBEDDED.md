@@ -23,25 +23,28 @@ Call `netnox_ssh_server_set_host_ed25519_seed()` with a 32-byte Ed25519 seed
 
 ## Authentication
 
-`netnox_ssh_server_set_allowed_password()` configures a single shared password
-accepted for **any** username (intended for lab / firmware shells). Extend the
-server sources for per-user stores or public-key verification if needed.
+Use `netnox_ssh_server_set_publickey_callback()` to decide whether the
+requested username and Ed25519 public key are authorized. The Linux daemon
+checks the local account and protected `authorized_keys` before signature
+verification. Password authentication is not implemented. See
+[Linux server integration](server.md) for its account and host-key rules.
 
 ## Subsystems and PTY
 
-- **exec**: one-shot `sh -c` on Unix (`fork`/`pipe`) and `cmd /c` on Windows
-  (`_popen`), stdout/stderr streamed as channel data.
-- **shell** / **pty-req**: rejected with `CHANNEL_FAILURE` until PTY adapters
-  are wired.
+- On Linux, **exec**, **shell**, optional **PTY**, terminal resize and
+  exit-status forwarding are implemented using OS account/session support.
+  An individual exec command is limited to 512 bytes.
 - **subsystem sftp**: rejected (scaffolding only); SFTP framing can be added
   later.
 
 ## Optional hooks
 
-See `server/embedded_adapter.h` for typedefs describing optional monotonic
-clock and CSPRNG hooks. The current implementation uses `rand()` for SSH
-padding and KEXINIT cookies; hardened devices should replace these with NoxTLS
-DRBG calls.
+`server/embedded_adapter.h` contains future/platform-specific hook typedefs;
+they are not an implemented RTOS or bare-metal session backend. The current
+server uses a blocking OS CSPRNG (Linux `getrandom`) and fails instead of
+falling back to `rand()`. A non-Linux embedded port also needs monotonic time,
+authorization and application/session adapters. Stream callbacks alone do
+not establish a complete portable server implementation.
 
 ## Build without the daemon
 
