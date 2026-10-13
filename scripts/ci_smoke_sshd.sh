@@ -37,6 +37,13 @@ SSH_OPTS=(-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o 
 echo "ci_smoke_sshd: OpenSSH exec $(date -u +%FT%TZ)"
 OUT="$(ssh "${SSH_OPTS[@]}" "$USER_NAME@127.0.0.1" 'printf ci_exec_ok')"
 [[ "$OUT" == 'ci_exec_ok' ]]
+echo "ci_smoke_sshd: quiet child after output EOF $(date -u +%FT%TZ)"
+if ssh "${SSH_OPTS[@]}" "$USER_NAME@127.0.0.1" 'exec 0<&- 1>&- 2>&-; sleep 11; exit 9' > /dev/null 2>"$KEYDIR/quiet.err"; then
+  echo 'quiet child returned success instead of status 9' >&2; exit 1
+else
+  rc=$?
+  if ((rc != 9)); then cat "$KEYDIR/quiet.err" >&2; echo "quiet child returned status $rc instead of 9" >&2; exit 1; fi
+fi
 echo "ci_smoke_sshd: OpenSSH PTY $(date -u +%FT%TZ)"
 OUT="$(printf 'printf ci_shell_ok; exit\n' | ssh -tt "${SSH_OPTS[@]}" "$USER_NAME@127.0.0.1")"
 [[ "$OUT" == *ci_shell_ok* ]]

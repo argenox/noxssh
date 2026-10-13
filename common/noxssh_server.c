@@ -1410,7 +1410,6 @@ static int srv_write_child(int fd, const uint8_t *data, uint32_t len, int pty)
 static netnox_return_t srv_run_session_unix(netnox_ssh_server_t *s, const char *cmd, int shell)
 {
     int pair[2] = {-1, -1}, child_fd = -1, status = 0, child_reaped = 0, output_eof = 0;
-    unsigned eof_waits = 0u;
     pid_t pid;
     struct winsize ws;
     uint8_t payload[NETNOX_SSH_MAX_PACKET_LEN], output[4096];
@@ -1464,7 +1463,7 @@ static netnox_return_t srv_run_session_unix(netnox_ssh_server_t *s, const char *
          * Recheck child exit promptly instead of waiting for a client keepalive. */
         rc = poll(pf, nfd, output_eof ? 50 : 1800000); /* 30-minute idle session limit. */
         if(rc < 0 && errno == EINTR) continue;
-        if(rc <= 0 && !(rc == 0 && output_eof && ++eof_waits <= 200u)) break;
+        if(rc <= 0 && !(rc == 0 && output_eof)) break;
         if(pf[0].revents & (POLLERR | POLLHUP | POLLNVAL)) break;
         if(pf[0].revents & POLLIN) {
             uint32_t off = 1u, channel, amount;
