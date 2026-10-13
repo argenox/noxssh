@@ -56,6 +56,13 @@ static uint64_t srv_now_ms(void)
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
+static int srv_equal_mac(const uint8_t *a, const uint8_t *b, uint32_t len)
+{
+    uint8_t diff = 0u; uint32_t i;
+    for(i=0u;i<len;i++) diff |= (uint8_t)(a[i] ^ b[i]);
+    return diff == 0u;
+}
+
 static int netnox_ssh_srv_debug(void)
 {
     const char * env = getenv("NETNOX_SSH_DEBUG");
@@ -983,7 +990,7 @@ static netnox_return_t srv_recv_packet(netnox_ssh_server_t * s,
                                   mac_input, 4u + plain_len, computed_mac) != NETNOX_RETURN_SUCCESS) {
             return NETNOX_RETURN_FAILED;
         }
-        if(memcmp(computed_mac, mac_buf, NETNOX_SSH_MAC_LEN) != 0) {
+        if(!srv_equal_mac(computed_mac, mac_buf, NETNOX_SSH_MAC_LEN)) {
             SRVDBG("encrypted packet MAC mismatch");
             return NETNOX_RETURN_FAILED;
         }
