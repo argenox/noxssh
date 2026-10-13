@@ -1,4 +1,4 @@
 [submodule "noxtls"]
 	path = noxtls
-	url = git@github.com:argenox/noxtls.git
+	url = https://github.com/argenox/noxtls.git
 	branch = master

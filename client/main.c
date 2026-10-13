@@ -463,6 +463,13 @@ static int noxssh_load_ed25519_seed_file(const char * path, uint8_t out_seed[32]
     }
     raw[nread] = '\0';
 
+    /* Base64 contains hex-looking characters; detect OpenSSH keys before
+     * scanning for a bare hex seed. Otherwise a normal key exceeds 64 hex
+     * characters and is rejected before the OpenSSH parser runs. */
+    if(strstr(raw, "-----BEGIN OPENSSH PRIVATE KEY-----") != NULL) {
+        return noxssh_load_openssh_ed25519_key(raw, (uint32_t)nread, out_seed);
+    }
+
     for(i = 0u; i < (uint32_t)nread; i++) {
         int nib = noxssh_hex_nibble(raw[i]);
         if(nib >= 0) {

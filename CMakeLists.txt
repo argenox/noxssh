@@ -48,6 +48,9 @@ add_subdirectory(noxtls EXCLUDE_FROM_ALL)
 add_library(netnox_ssh
     common/noxssh_common.c
 )
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(netnox_ssh PRIVATE common/noxssh_server.c)
+endif()
 target_include_directories(netnox_ssh
     PUBLIC
         ${CMAKE_SOURCE_DIR}/common
@@ -74,6 +77,15 @@ target_compile_definitions(netnox_ssh
         NOXTLS_FEATURE_AES_CTR=1
 )
 add_subdirectory(client)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_subdirectory(server)
+endif()
+
+option(NOXSSH_BUILD_TESTS "Build noxssh unit tests" ON)
+if(NOXSSH_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
 
 install(FILES
     README.md

@@ -127,6 +127,13 @@ jobs:
             cp "${deb}" "release-assets/noxssh-${{ matrix.artifact_suffix }}-v${VERSION}.deb"
           done
 
+      - name: Verify binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f bin/noxssh
+          if [[ "${{ runner.os }}" == "Linux" ]]; then test -f bin/noxsshd; fi
+
       - name: Create release archives
         shell: bash
         run: |

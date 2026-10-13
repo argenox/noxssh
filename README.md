@@ -1,5 +1,7 @@
 # NoxSSH
 
+The opt-in Linux SSH server is documented in [docs/server.md](docs/server.md).
+
 [![Build](https://github.com/argenox/noxssh/actions/workflows/build.yml/badge.svg)](https://github.com/argenox/noxssh/actions/workflows/build.yml)
 [![Release on tag](https://github.com/argenox/noxssh/actions/workflows/release-on-tag.yml/badge.svg)](https://github.com/argenox/noxssh/actions/workflows/release-on-tag.yml)
 
