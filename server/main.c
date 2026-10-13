@@ -58,7 +58,7 @@ static int random_seed(uint8_t seed[32])
 
 static int host_seed(const char *path, uint8_t seed[32])
 {
-    int fd, created = 0;
+    int fd = -1, parent_fd = -1, result = -1;
     struct stat st;
     uint8_t extra;
     ssize_t n;
@@ -66,43 +66,65 @@ static int host_seed(const char *path, uint8_t seed[32])
     char parent[4096];
     const char *slash = strrchr(path, '/');
     if(!slash || (size_t)(slash - path) >= sizeof(parent) || slash == path) return -1;
+    if(!slash[1] || !strcmp(slash + 1, ".") || !strcmp(slash + 1, "..")) return -1;
     memcpy(parent, path, (size_t)(slash - path));
     parent[slash - path] = 0;
-    if(lstat(parent, &st) || !S_ISDIR(st.st_mode) || (st.st_mode & 022) || st.st_uid != geteuid()) return -1;
-    fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    /* A trailing slash would make the kernel follow a final directory symlink
+     * even with O_NOFOLLOW. Keep only the root directory's required slash. */
+    pos = (size_t)(slash - path);
+    while(pos > 1u && parent[pos - 1u] == '/') parent[--pos] = 0;
+    /* Validate and retain the directory we actually opened. A later pathname
+     * rename/symlink replacement must not redirect seed I/O, cleanup or fsync. */
+    parent_fd = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if(parent_fd < 0 || fstat(parent_fd, &st) || !S_ISDIR(st.st_mode) ||
+       (st.st_mode & 022) || st.st_uid != geteuid()) goto out;
+    fd = openat(parent_fd, slash + 1, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if(fd < 0 && errno == ENOENT) {
-        if(random_seed(seed)) return -1;
-        fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if(random_seed(seed)) goto out;
+        fd = openat(parent_fd, slash + 1,
+                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
         if(fd >= 0) {
-            created = 1;
+            if(fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+               (st.st_mode & 077) || st.st_size != 0) goto remove_created;
             pos = 0;
             while(pos < 32u) {
                 n = write(fd, seed + pos, 32u - pos);
                 if(n > 0) { pos += (size_t)n; continue; }
                 if(n < 0 && errno == EINTR) continue;
-                close(fd); unlink(path); return -1;
+                goto remove_created;
             }
             { int sync_rc = fsync(fd); int close_rc = close(fd);
-              if(sync_rc || close_rc) { unlink(path); return -1; } }
-            fd = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-            if(fd < 0 || fsync(fd)) { if(fd >= 0) close(fd); return -1; }
-            close(fd);
-        } else if(errno != EEXIST) return -1;
+              fd = -1;
+              if(sync_rc || close_rc) goto remove_created; }
+            /* Keep a complete seed if directory durability cannot be confirmed;
+             * fail this invocation without silently generating another identity. */
+            if(fsync(parent_fd)) goto out;
+            result = 0;
+            goto out;
+        } else if(errno != EEXIST) goto out;
     }
-    if(created) return 0;
-    if(fd < 0) fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if(fd < 0) fd = openat(parent_fd, slash + 1,
+                          O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if(fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
-       (st.st_mode & 077) || st.st_size != 32) { if(fd >= 0) close(fd); return -1; }
+       (st.st_mode & 077) || st.st_size != 32) goto out;
     pos = 0;
     while(pos < 32u) {
         n = read(fd, seed + pos, 32u - pos);
         if(n > 0) { pos += (size_t)n; continue; }
         if(n < 0 && errno == EINTR) continue;
-        close(fd); return -1;
+        goto out;
     }
     n = read(fd, &extra, 1u);
-    close(fd);
-    return n == 0 ? 0 : -1;
+    result = n == 0 ? 0 : -1;
+    goto out;
+remove_created:
+    if(fd >= 0) { close(fd); fd = -1; }
+    (void)unlinkat(parent_fd, slash + 1, 0);
+out:
+    if(fd >= 0 && close(fd)) result = -1;
+    if(parent_fd >= 0 && close(parent_fd)) result = -1;
+    if(result) memset(seed, 0, 32u);
+    return result;
 }
 
 int main(int argc, char **argv)
