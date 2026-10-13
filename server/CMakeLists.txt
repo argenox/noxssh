@@ -2,6 +2,9 @@ add_executable(noxsshd
     main.c
     daemon_runtime.c
 )
+if(UNIX)
+    target_sources(noxsshd PRIVATE auth_posix.c)
+endif()
 
 target_include_directories(noxsshd
     PRIVATE
@@ -17,3 +20,5 @@ target_link_libraries(noxsshd
 if(WIN32)
     target_link_libraries(noxsshd PRIVATE ws2_32)
 endif()
+
+install(TARGETS noxsshd RUNTIME DESTINATION bin)

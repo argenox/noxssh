@@ -8,6 +8,9 @@
 #include <string.h>
 
 #include "daemon_runtime.h"
+#ifndef _WIN32
+#include "auth_posix.h"
+#endif
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -27,6 +30,10 @@ typedef SOCKET noxsshd_sock_t;
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <sys/time.h>
+static void noxsshd_child_signal(int signo) { (void)signo; }
 typedef int noxsshd_sock_t;
 #define NOXSSH_INVALID_SOCKET (-1)
 #define NOXSSH_CLOSESOCK close
@@ -47,7 +54,7 @@ static int32_t noxsshd_send_cb(void * user_data, const uint8_t * data, uint32_t 
 #ifdef _WIN32
     return send(c->sock, (const char *)data, (int)len, 0);
 #else
-    return (int32_t)send(c->sock, data, (size_t)len, 0);
+    return (int32_t)send(c->sock, data, (size_t)len, MSG_NOSIGNAL);
 #endif
 }
 
@@ -65,7 +72,6 @@ static int32_t noxsshd_recv_cb(void * user_data, uint8_t * data, uint32_t len)
 }
 
 static int noxsshd_serve_connection(noxsshd_sock_t client_sock,
-                                    const char * password,
                                     const uint8_t host_ed25519_seed[32])
 {
     netnox_ssh_server_t srv;
@@ -80,11 +86,10 @@ static int noxsshd_serve_connection(noxsshd_sock_t client_sock,
     if(netnox_ssh_server_set_host_ed25519_seed(&srv, host_ed25519_seed) != NETNOX_RETURN_SUCCESS) {
         return 1;
     }
-    if(password != NULL && password[0] != '\0') {
-        if(netnox_ssh_server_set_allowed_password(&srv, password) != NETNOX_RETURN_SUCCESS) {
-            return 1;
-        }
-    }
+#ifndef _WIN32
+    netnox_ssh_server_set_publickey_callback(&srv, noxsshd_authorized_ed25519, NULL);
+    srv.transport_fd = client_sock;
+#endif
     rc = netnox_ssh_server_serve_one(&srv);
     netnox_ssh_server_reset(&srv);
     return (rc == NETNOX_RETURN_SUCCESS) ? 0 : 1;
@@ -92,7 +97,6 @@ static int noxsshd_serve_connection(noxsshd_sock_t client_sock,
 
 #ifndef _WIN32
 static int noxsshd_listen_posix(const char * bind_host, uint16_t port,
-                                  const char * password,
                                   const uint8_t host_ed25519_seed[32])
 {
     struct addrinfo hints;
@@ -102,6 +106,8 @@ static int noxsshd_listen_posix(const char * bind_host, uint16_t port,
     noxsshd_sock_t listen_fd = NOXSSH_INVALID_SOCKET;
     int yes = 1;
     int gai_err;
+    unsigned active = 0u;
+    struct sigaction sa;
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
@@ -139,20 +145,40 @@ static int noxsshd_listen_posix(const char * bind_host, uint16_t port,
         NOXSSH_CLOSESOCK(listen_fd);
         return 1;
     }
-    fprintf(stderr, "noxsshd: listening (sequential accept)\n");
+    memset(&sa,0,sizeof(sa));
+    sa.sa_handler = noxsshd_child_signal;
+    sigemptyset(&sa.sa_mask);
+    if(sigaction(SIGCHLD,&sa,NULL)) { NOXSSH_CLOSESOCK(listen_fd); return 1; }
+    fprintf(stderr, "noxsshd: listening (four concurrent sessions maximum)\n");
     for(;;) {
+        pid_t done;
+        while((done = waitpid(-1,NULL,WNOHANG)) > 0) { if(active) active--; }
         noxsshd_sock_t client = accept(listen_fd, NULL, NULL);
         if(client == NOXSSH_INVALID_SOCKET) {
-            perror("noxsshd: accept");
+            if(errno != EINTR) perror("noxsshd: accept");
             continue;
         }
-        (void)noxsshd_serve_connection(client, password, host_ed25519_seed);
-        NOXSSH_CLOSESOCK(client);
+        if(active >= 4u) { NOXSSH_CLOSESOCK(client); continue; }
+        {
+            struct timeval tv = { 10, 0 };
+            pid_t child;
+            (void)setsockopt(client,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof(tv));
+            (void)setsockopt(client,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof(tv));
+            child = fork();
+            if(child == 0) {
+                int rc;
+                NOXSSH_CLOSESOCK(listen_fd);
+                rc = noxsshd_serve_connection(client,host_ed25519_seed);
+                NOXSSH_CLOSESOCK(client);
+                _exit(rc);
+            }
+            if(child > 0) active++;
+            NOXSSH_CLOSESOCK(client);
+        }
     }
 }
 #else
 static int noxsshd_listen_win32(const char * bind_host, uint16_t port,
-                                const char * password,
                                 const uint8_t host_ed25519_seed[32])
 {
     struct addrinfo hints;
@@ -216,7 +242,7 @@ static int noxsshd_listen_win32(const char * bind_host, uint16_t port,
             fprintf(stderr, "noxsshd: accept failed\n");
             continue;
         }
-        (void)noxsshd_serve_connection(client, password, host_ed25519_seed);
+        (void)noxsshd_serve_connection(client, host_ed25519_seed);
         closesocket(client);
     }
 }
@@ -224,12 +250,11 @@ static int noxsshd_listen_win32(const char * bind_host, uint16_t port,
 
 int noxsshd_listen_loop(const char * bind_host,
                         uint16_t port,
-                        const char * password,
                         const uint8_t host_ed25519_seed[32])
 {
 #ifndef _WIN32
-    return noxsshd_listen_posix(bind_host, port, password, host_ed25519_seed);
+    return noxsshd_listen_posix(bind_host, port, host_ed25519_seed);
 #else
-    return noxsshd_listen_win32(bind_host, port, password, host_ed25519_seed);
+    return noxsshd_listen_win32(bind_host, port, host_ed25519_seed);
 #endif
 }

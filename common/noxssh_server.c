@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 /*****************************************************************************
 * Copyright (c) [2019] - [2026], Argenox Technologies LLC
 * SPDX-License-Identifier: GPL-2.0-or-later OR NoxTLS-Commercial
@@ -10,11 +11,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 
 #ifdef _WIN32
 /* Windows: one-shot exec uses _popen only. */
 #else
 #include <unistd.h>
+#include <fcntl.h>
+#include <grp.h>
+#include <poll.h>
+#include <pty.h>
+#include <pwd.h>
+#include <signal.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/random.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 
@@ -37,7 +49,12 @@ extern char ** environ;
 #define NETNOX_SSH_AES_BLOCK_LEN (16u)
 #define NETNOX_SSH_MAC_LEN (32u)
 
-static uint8_t g_srv_prng_seeded;
+static uint64_t srv_now_ms(void)
+{
+    struct timespec ts;
+    if(clock_gettime(CLOCK_MONOTONIC,&ts)) return UINT64_MAX;
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
 
 static int netnox_ssh_srv_debug(void)
 {
@@ -79,19 +96,23 @@ static uint32_t netnox_ssh_read_u32_be(const uint8_t * in)
            (uint32_t)in[3];
 }
 
-static void netnox_ssh_fill_random(uint8_t * out, uint32_t len)
+static netnox_return_t netnox_ssh_fill_random(uint8_t * out, uint32_t len)
 {
-    uint32_t i;
-    if(out == NULL || len == 0u) {
-        return;
+    uint32_t pos = 0u;
+    if(out == NULL) return NETNOX_RETURN_BAD_PARAM;
+#ifdef __linux__
+    while(pos < len) {
+        ssize_t n = getrandom(out + pos, len - pos, 0);
+        if(n > 0) { pos += (uint32_t)n; continue; }
+        if(n < 0 && errno == EINTR) continue;
+        return NETNOX_RETURN_FAILED;
     }
-    if(g_srv_prng_seeded == 0u) {
-        srand((unsigned int)time(NULL));
-        g_srv_prng_seeded = 1u;
-    }
-    for(i = 0u; i < len; i++) {
-        out[i] = (uint8_t)(rand() & 0xFF);
-    }
+    return NETNOX_RETURN_SUCCESS;
+#else
+    /* This server requires a blocking OS CSPRNG. Do not silently use rand(). */
+    (void)pos; (void)len;
+    return NETNOX_RETURN_FAILED;
+#endif
 }
 
 static netnox_return_t netnox_ssh_copy_string(char * dst, uint16_t dst_len, const char * src)
@@ -168,6 +189,9 @@ static netnox_return_t netnox_ssh_send_all(netnox_ssh_server_t * s, const uint8_
         return NETNOX_RETURN_BAD_PARAM;
     }
     while(sent_total < len) {
+        uint64_t now = srv_now_ms();
+        if(now == UINT64_MAX || (s->send_deadline_ms && now > s->send_deadline_ms) ||
+           (!s->session_started && s->handshake_deadline_ms && now > s->handshake_deadline_ms)) return NETNOX_RETURN_FAILED;
         int32_t sent = s->send_cb(s->io_user_data, data + sent_total, len - sent_total);
         if(sent <= 0) {
             return NETNOX_RETURN_FAILED;
@@ -184,6 +208,9 @@ static netnox_return_t netnox_ssh_recv_exact(netnox_ssh_server_t * s, uint8_t * 
         return NETNOX_RETURN_BAD_PARAM;
     }
     while(recv_total < len) {
+        uint64_t now = srv_now_ms();
+        if(now == UINT64_MAX || (s->packet_deadline_ms && now > s->packet_deadline_ms) ||
+           (!s->session_started && s->handshake_deadline_ms && now > s->handshake_deadline_ms)) return NETNOX_RETURN_FAILED;
         int32_t got = s->recv_cb(s->io_user_data, data + recv_total, len - recv_total);
         if(got <= 0) {
             return NETNOX_RETURN_FAILED;
@@ -202,6 +229,7 @@ static netnox_return_t netnox_ssh_recv_line(netnox_ssh_server_t * s, char * out,
     while(used < (uint16_t)(out_len - 1u)) {
         int32_t rc;
         uint8_t ch = 0u;
+        if(srv_now_ms() > s->handshake_deadline_ms) return NETNOX_RETURN_FAILED;
         rc = s->recv_cb(s->io_user_data, &ch, 1u);
         if(rc <= 0) {
             return NETNOX_RETURN_FAILED;
@@ -769,29 +797,29 @@ static netnox_return_t srv_build_kexinit_payload(uint8_t * payload,
     }
     payload[0] = NETNOX_SSH_MSG_KEXINIT;
     *payload_len = 1u;
-    netnox_ssh_fill_random(&payload[*payload_len], NETNOX_SSH_KEXINIT_COOKIE_LEN);
+    if(netnox_ssh_fill_random(&payload[*payload_len], NETNOX_SSH_KEXINIT_COOKIE_LEN) != NETNOX_RETURN_SUCCESS) return NETNOX_RETURN_FAILED;
     *payload_len += NETNOX_SSH_KEXINIT_COOKIE_LEN;
-    rc = netnox_ssh_payload_append_namelist(payload, payload_len, payload_max, NETNOX_SSH_KEX_ALG_LIST);
+    rc = netnox_ssh_payload_append_namelist(payload, payload_len, payload_max, "curve25519-sha256");
     if(rc != NETNOX_RETURN_SUCCESS) {
         return NETNOX_RETURN_FAILED;
     }
-    rc = netnox_ssh_payload_append_namelist(payload, payload_len, payload_max, NETNOX_SSH_HOST_KEY_ALG_LIST);
+    rc = netnox_ssh_payload_append_namelist(payload, payload_len, payload_max, "ssh-ed25519");
     if(rc != NETNOX_RETURN_SUCCESS) {
         return NETNOX_RETURN_FAILED;
     }
-    rc = netnox_ssh_payload_append_namelist(payload, payload_len, payload_max, NETNOX_SSH_CIPHER_ALG_LIST);
+    rc = netnox_ssh_payload_append_namelist(payload, payload_len, payload_max, "aes128-ctr");
     if(rc != NETNOX_RETURN_SUCCESS) {
         return NETNOX_RETURN_FAILED;
     }
-    rc = netnox_ssh_payload_append_namelist(payload, payload_len, payload_max, NETNOX_SSH_CIPHER_ALG_LIST);
+    rc = netnox_ssh_payload_append_namelist(payload, payload_len, payload_max, "aes128-ctr");
     if(rc != NETNOX_RETURN_SUCCESS) {
         return NETNOX_RETURN_FAILED;
     }
-    rc = netnox_ssh_payload_append_namelist(payload, payload_len, payload_max, NETNOX_SSH_MAC_ALG_LIST);
+    rc = netnox_ssh_payload_append_namelist(payload, payload_len, payload_max, "hmac-sha2-256");
     if(rc != NETNOX_RETURN_SUCCESS) {
         return NETNOX_RETURN_FAILED;
     }
-    rc = netnox_ssh_payload_append_namelist(payload, payload_len, payload_max, NETNOX_SSH_MAC_ALG_LIST);
+    rc = netnox_ssh_payload_append_namelist(payload, payload_len, payload_max, "hmac-sha2-256");
     if(rc != NETNOX_RETURN_SUCCESS) {
         return NETNOX_RETURN_FAILED;
     }
@@ -843,6 +871,7 @@ static netnox_return_t srv_send_packet(netnox_ssh_server_t * s,
     if(s == NULL || payload == NULL || payload_len == 0u) {
         return NETNOX_RETURN_BAD_PARAM;
     }
+    s->send_deadline_ms = srv_now_ms() + 10000u;
     block_size = (s->key_exchange_complete != 0u) ? NETNOX_SSH_AES_BLOCK_LEN : NETNOX_SSH_PACKET_BLOCK_SIZE;
     while(((1u + payload_len + padding_len + 4u) % block_size) != 0u) {
         padding_len++;
@@ -855,7 +884,7 @@ static netnox_return_t srv_send_packet(netnox_ssh_server_t * s,
     netnox_ssh_write_u32_be(&plain[0], packet_len);
     plain[4] = (uint8_t)padding_len;
     memcpy(&plain[5], payload, payload_len);
-    netnox_ssh_fill_random(&plain[5u + payload_len], padding_len);
+    if(netnox_ssh_fill_random(&plain[5u + payload_len], padding_len) != NETNOX_RETURN_SUCCESS) return NETNOX_RETURN_FAILED;
 
     if(s->key_exchange_complete != 0u) {
         uint8_t mac_input[4u + 4u + NETNOX_SSH_MAX_PACKET_LEN];
@@ -867,40 +896,15 @@ static netnox_return_t srv_send_packet(netnox_ssh_server_t * s,
                                   mac_input, 4u + plain_len, mac_buf) != NETNOX_RETURN_SUCCESS) {
             return NETNOX_RETURN_FAILED;
         }
-        aes_rc = aes_encrypt_ctr(s->s2c_key, plain, plain_len, s->s2c_counter, enc, AES_128_BIT);
+        aes_rc = noxtls_aes_encrypt_ctr(s->s2c_key, plain, plain_len, s->s2c_counter, enc, NOXTLS_AES_128_BIT);
         if(aes_rc != NOXTLS_RETURN_SUCCESS) {
             return NETNOX_RETURN_FAILED;
         }
         n_blocks = (plain_len + NETNOX_SSH_AES_BLOCK_LEN - 1u) / NETNOX_SSH_AES_BLOCK_LEN;
         netnox_ssh_ctr_increment_blocks(s->s2c_counter, n_blocks);
-        {
-            uint8_t combined[128];
-            uint32_t total = s->pending_newkeys_len + enc_mac_len;
-            if(total > 0u && total <= (uint32_t)sizeof(combined)) {
-                uint32_t off = 0u;
-                if(s->pending_newkeys_len > 0u) {
-                    memcpy(combined, s->pending_newkeys, s->pending_newkeys_len);
-                    off = s->pending_newkeys_len;
-                    s->pending_newkeys_len = 0u;
-                }
-                memcpy(combined + off, enc, plain_len);
-                memcpy(combined + off + plain_len, mac_buf, NETNOX_SSH_MAC_LEN);
-                if(netnox_ssh_send_all(s, combined, total) != NETNOX_RETURN_SUCCESS) {
-                    return NETNOX_RETURN_FAILED;
-                }
-            } else {
-                if(s->pending_newkeys_len > 0u) {
-                    if(netnox_ssh_send_all(s, s->pending_newkeys, s->pending_newkeys_len) != NETNOX_RETURN_SUCCESS) {
-                        return NETNOX_RETURN_FAILED;
-                    }
-                    s->pending_newkeys_len = 0u;
-                }
-                memcpy(combined, enc, plain_len);
-                memcpy(combined + plain_len, mac_buf, NETNOX_SSH_MAC_LEN);
-                if(netnox_ssh_send_all(s, combined, enc_mac_len) != NETNOX_RETURN_SUCCESS) {
-                    return NETNOX_RETURN_FAILED;
-                }
-            }
+        if(netnox_ssh_send_all(s, enc, plain_len) != NETNOX_RETURN_SUCCESS ||
+           netnox_ssh_send_all(s, mac_buf, NETNOX_SSH_MAC_LEN) != NETNOX_RETURN_SUCCESS) {
+            return NETNOX_RETURN_FAILED;
         }
         s->send_seq++;
         s->encrypted_bytes_sent += (uint64_t)enc_mac_len;
@@ -934,6 +938,7 @@ static netnox_return_t srv_recv_packet(netnox_ssh_server_t * s,
     if(s == NULL || payload_out == NULL || payload_len_out == NULL) {
         return NETNOX_RETURN_BAD_PARAM;
     }
+    s->packet_deadline_ms = srv_now_ms() + 10000u;
 
     if(s->key_exchange_complete != 0u) {
         uint8_t enc[4u + NETNOX_SSH_MAX_PACKET_LEN];
@@ -948,21 +953,22 @@ static netnox_return_t srv_recv_packet(netnox_ssh_server_t * s,
         if(netnox_ssh_recv_exact(s, enc, NETNOX_SSH_AES_BLOCK_LEN) != NETNOX_RETURN_SUCCESS) {
             return NETNOX_RETURN_FAILED;
         }
-        aes_rc = aes_encrypt_ctr(s->c2s_key, enc, NETNOX_SSH_AES_BLOCK_LEN, s->c2s_counter, plain, AES_128_BIT);
+        aes_rc = noxtls_aes_encrypt_ctr(s->c2s_key, enc, NETNOX_SSH_AES_BLOCK_LEN, s->c2s_counter, plain, NOXTLS_AES_128_BIT);
         if(aes_rc != NOXTLS_RETURN_SUCCESS) {
             return NETNOX_RETURN_FAILED;
         }
         netnox_ssh_ctr_increment_blocks(s->c2s_counter, 1u);
         packet_len = netnox_ssh_read_u32_be(&plain[0]);
         if(packet_len < (1u + NETNOX_SSH_MIN_PADDING_LEN) || packet_len > NETNOX_SSH_MAX_PACKET_LEN) {
+            SRVDBG("bad encrypted packet length %u", (unsigned)packet_len);
             return NETNOX_RETURN_FAILED;
         }
         plain_len = 4u + packet_len;
         if(netnox_ssh_recv_exact(s, &enc[NETNOX_SSH_AES_BLOCK_LEN], plain_len - NETNOX_SSH_AES_BLOCK_LEN) != NETNOX_RETURN_SUCCESS) {
             return NETNOX_RETURN_FAILED;
         }
-        aes_rc = aes_encrypt_ctr(s->c2s_key, &enc[NETNOX_SSH_AES_BLOCK_LEN], plain_len - NETNOX_SSH_AES_BLOCK_LEN,
-                                 s->c2s_counter, &plain[NETNOX_SSH_AES_BLOCK_LEN], AES_128_BIT);
+        aes_rc = noxtls_aes_encrypt_ctr(s->c2s_key, &enc[NETNOX_SSH_AES_BLOCK_LEN], plain_len - NETNOX_SSH_AES_BLOCK_LEN,
+                                 s->c2s_counter, &plain[NETNOX_SSH_AES_BLOCK_LEN], NOXTLS_AES_128_BIT);
         if(aes_rc != NOXTLS_RETURN_SUCCESS) {
             return NETNOX_RETURN_FAILED;
         }
@@ -978,6 +984,7 @@ static netnox_return_t srv_recv_packet(netnox_ssh_server_t * s,
             return NETNOX_RETURN_FAILED;
         }
         if(memcmp(computed_mac, mac_buf, NETNOX_SSH_MAC_LEN) != 0) {
+            SRVDBG("encrypted packet MAC mismatch");
             return NETNOX_RETURN_FAILED;
         }
         s->recv_seq++;
@@ -1098,7 +1105,11 @@ static netnox_return_t srv_perform_curve25519_kex(netnox_ssh_server_t * s)
     if(pub_c_len != 32u) {
         return NETNOX_RETURN_FAILED;
     }
-    if(noxtls_x25519_generate_key(priv_s, pub_s) != NOXTLS_RETURN_SUCCESS) {
+    if(netnox_ssh_fill_random(priv_s, sizeof(priv_s)) != NETNOX_RETURN_SUCCESS) {
+        return NETNOX_RETURN_FAILED;
+    }
+    noxtls_x25519_clamp_scalar(priv_s);
+    if(noxtls_x25519_public_key(priv_s, pub_s) != NOXTLS_RETURN_SUCCESS) {
         return NETNOX_RETURN_FAILED;
     }
     if(noxtls_x25519_shared_secret(priv_s, pub_c, shared_raw) != NOXTLS_RETURN_SUCCESS) {
@@ -1164,8 +1175,6 @@ static netnox_return_t srv_perform_curve25519_kex(netnox_ssh_server_t * s)
         return NETNOX_RETURN_FAILED;
     }
     s->key_exchange_complete = 1u;
-    s->send_seq = 0u;
-    s->recv_seq = 0u;
     return NETNOX_RETURN_SUCCESS;
 }
 
@@ -1190,7 +1199,7 @@ static netnox_return_t srv_send_userauth_failure(netnox_ssh_server_t * s, int pa
 {
     uint8_t payload[256];
     uint32_t payload_len = 0u;
-    const char * methods = "password,publickey";
+    const char * methods = "publickey";
     if(s == NULL) {
         return NETNOX_RETURN_BAD_PARAM;
     }
@@ -1211,6 +1220,16 @@ static netnox_return_t srv_send_userauth_success(netnox_ssh_server_t * s)
 {
     uint8_t p[1] = { NETNOX_SSH_MSG_USERAUTH_SUCCESS };
     return srv_send_packet(s, p, 1u);
+}
+
+static netnox_return_t srv_send_userauth_pk_ok(netnox_ssh_server_t *s, const uint8_t *alg,
+                                               uint32_t alg_len, const uint8_t *blob, uint32_t blob_len)
+{
+    uint8_t p[256]; uint32_t len = 0u;
+    if(netnox_ssh_payload_append_u8(p, &len, sizeof(p), 60u) != NETNOX_RETURN_SUCCESS ||
+       netnox_ssh_payload_append_string(p, &len, sizeof(p), alg, alg_len) != NETNOX_RETURN_SUCCESS ||
+       netnox_ssh_payload_append_string(p, &len, sizeof(p), blob, blob_len) != NETNOX_RETURN_SUCCESS) return NETNOX_RETURN_FAILED;
+    return srv_send_packet(s, p, len);
 }
 
 static netnox_return_t srv_send_global_request_failure(netnox_ssh_server_t * s)
@@ -1354,60 +1373,152 @@ static netnox_return_t srv_maybe_window_adjust(netnox_ssh_server_t * s)
 }
 
 #ifndef _WIN32
-static netnox_return_t srv_run_exec_unix(netnox_ssh_server_t * s, const char * cmd)
+static netnox_return_t srv_send_exit_status(netnox_ssh_server_t *s, uint32_t status)
 {
-    int fd[2];
-    pid_t pid;
-    ssize_t n;
-    uint8_t buf[4096];
+    uint8_t p[64]; uint32_t len = 0u;
+    if(netnox_ssh_payload_append_u8(p, &len, sizeof(p), NETNOX_SSH_MSG_CHANNEL_REQUEST) != NETNOX_RETURN_SUCCESS ||
+       netnox_ssh_payload_append_u32(p, &len, sizeof(p), s->remote_channel_id) != NETNOX_RETURN_SUCCESS ||
+       netnox_ssh_payload_append_string(p, &len, sizeof(p), (const uint8_t *)"exit-status", 11u) != NETNOX_RETURN_SUCCESS ||
+       netnox_ssh_payload_append_u8(p, &len, sizeof(p), 0u) != NETNOX_RETURN_SUCCESS ||
+       netnox_ssh_payload_append_u32(p, &len, sizeof(p), status) != NETNOX_RETURN_SUCCESS) return NETNOX_RETURN_FAILED;
+    return srv_send_packet(s, p, len);
+}
 
-    if(pipe(fd) != 0) {
-        return NETNOX_RETURN_FAILED;
+static int srv_write_child(int fd, const uint8_t *data, uint32_t len, int pty)
+{
+    uint32_t pos = 0u;
+    while(pos < len) {
+        ssize_t n = pty ? write(fd, data + pos, len - pos) : send(fd, data + pos, len - pos, MSG_NOSIGNAL);
+        if(n > 0) { pos += (uint32_t)n; continue; }
+        if(n < 0 && errno == EINTR) continue;
+        if(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct pollfd p = { fd, POLLOUT, 0 };
+            if(poll(&p, 1, 10000) > 0) continue;
+        }
+        return -1;
     }
-    pid = fork();
-    if(pid == (pid_t)0) {
-        char * argv[4];
-        (void)close(fd[0]);
-        if(dup2(fd[1], STDOUT_FILENO) < 0) {
-            _exit(127);
+    return 0;
+}
+
+static netnox_return_t srv_run_session_unix(netnox_ssh_server_t *s, const char *cmd, int shell)
+{
+    int pair[2] = {-1, -1}, child_fd = -1, status = 0, child_reaped = 0, output_eof = 0;
+    pid_t pid;
+    struct winsize ws;
+    uint8_t payload[NETNOX_SSH_MAX_PACKET_LEN], output[4096];
+    uint32_t len;
+    if(s->transport_fd < 0 || s->authenticated_user[0] == '\0') return NETNOX_RETURN_FAILED;
+    s->session_started = 1u;
+    memset(&ws, 0, sizeof(ws));
+    ws.ws_col = (unsigned short)s->pty_cols; ws.ws_row = (unsigned short)s->pty_rows;
+    ws.ws_xpixel = (unsigned short)s->pty_width; ws.ws_ypixel = (unsigned short)s->pty_height;
+    if(s->want_pty) pid = forkpty(&child_fd, NULL, NULL, &ws);
+    else {
+        if(socketpair(AF_UNIX, SOCK_STREAM, 0, pair)) return NETNOX_RETURN_FAILED;
+        pid = fork();
+    }
+    if(pid == 0) {
+        struct passwd *pw = getpwnam(s->authenticated_user);
+        const char *sh;
+        if(!s->want_pty) {
+            close(pair[0]);
+            if(setsid() < 0 || dup2(pair[1], 0) < 0 || dup2(pair[1], 1) < 0 || dup2(pair[1], 2) < 0) _exit(127);
+            if(pair[1] > 2) close(pair[1]);
         }
-        if(dup2(fd[1], STDERR_FILENO) < 0) {
-            _exit(127);
-        }
-        (void)close(fd[1]);
-        argv[0] = (char *)"sh";
-        argv[1] = (char *)"-c";
-        argv[2] = (char *)cmd;
-        argv[3] = NULL;
-        (void)execve("/bin/sh", argv, environ);
+        close(s->transport_fd);
+        if(!pw || !pw->pw_dir || !pw->pw_shell || !pw->pw_shell[0]) _exit(127);
+        if(geteuid() == 0) {
+            if(initgroups(pw->pw_name, pw->pw_gid) || setgid(pw->pw_gid) || setuid(pw->pw_uid)) _exit(127);
+        } else if(geteuid() != pw->pw_uid || getegid() != pw->pw_gid) _exit(127);
+        if(chdir(pw->pw_dir)) _exit(127);
+        sh = pw->pw_shell;
+        if(clearenv() || setenv("HOME", pw->pw_dir, 1) || setenv("USER", pw->pw_name, 1) ||
+           setenv("LOGNAME", pw->pw_name, 1) || setenv("SHELL", sh, 1) ||
+           setenv("PATH", "/usr/local/bin:/usr/bin:/bin", 1) ||
+           (s->want_pty && setenv("TERM", s->term[0] ? s->term : "vt100", 1))) _exit(127);
+        if(shell) execl(sh, sh, "-i", (char *)NULL);
+        else execl(sh, sh, "-c", cmd, (char *)NULL);
         _exit(127);
     }
-    if(pid < (pid_t)0) {
-        (void)close(fd[0]);
-        (void)close(fd[1]);
-        return NETNOX_RETURN_FAILED;
-    }
-    (void)close(fd[1]);
-    while((n = read(fd[0], buf, sizeof(buf))) > 0) {
-        uint32_t rem = (uint32_t)n;
-        uint32_t pos = 0u;
-        while(rem > 0u) {
-            uint32_t chunk = rem > 32000u ? 32000u : rem;
-            if(srv_send_channel_data_chunk(s, buf + pos, chunk) != NETNOX_RETURN_SUCCESS) {
-                (void)close(fd[0]);
-                (void)waitpid(pid, NULL, 0);
-                return NETNOX_RETURN_FAILED;
+    if(pid < 0) { if(pair[0] >= 0) { close(pair[0]); close(pair[1]); } return NETNOX_RETURN_FAILED; }
+    if(!s->want_pty) { close(pair[1]); child_fd = pair[0]; }
+    (void)fcntl(child_fd, F_SETFL, fcntl(child_fd, F_GETFL, 0) | O_NONBLOCK);
+    for(;;) {
+        struct pollfd pf[2]; int nfd = 1, rc;
+        if(s->rekey_threshold_bytes &&
+           (s->encrypted_bytes_sent >= s->rekey_threshold_bytes ||
+            s->encrypted_bytes_recv >= s->rekey_threshold_bytes)) break;
+        pf[0].fd = s->transport_fd; pf[0].events = POLLIN; pf[0].revents = 0;
+        if(!output_eof && s->remote_window_size) {
+            pf[1].fd = child_fd; pf[1].events = POLLIN | POLLHUP; pf[1].revents = 0; nfd = 2;
+        }
+        rc = poll(pf, nfd, 1800000); /* 30-minute idle session limit. */
+        if(rc < 0 && errno == EINTR) continue;
+        if(rc <= 0) break; /* Bound idle client or stalled remote window. */
+        if(pf[0].revents & (POLLERR | POLLHUP | POLLNVAL)) break;
+        if(pf[0].revents & POLLIN) {
+            uint32_t off = 1u, channel, amount;
+            const uint8_t *data; uint32_t data_len;
+            if(srv_recv_packet(s, payload, sizeof(payload), &len) != NETNOX_RETURN_SUCCESS || !len) break;
+            if(payload[0] == NETNOX_SSH_MSG_CHANNEL_DATA) {
+                if(netnox_ssh_payload_read_u32(payload,len,&off,&channel) != NETNOX_RETURN_SUCCESS || channel != s->local_channel_id ||
+                   netnox_ssh_payload_read_string_view(payload,len,&off,&data,&data_len) != NETNOX_RETURN_SUCCESS ||
+                   off != len || data_len > s->local_window_size || srv_write_child(child_fd,data,data_len,s->want_pty)) break;
+                s->local_window_size -= data_len;
+                if(srv_maybe_window_adjust(s) != NETNOX_RETURN_SUCCESS) break;
+            } else if(payload[0] == NETNOX_SSH_MSG_CHANNEL_WINDOW_ADJUST) {
+                if(netnox_ssh_payload_read_u32(payload,len,&off,&channel) != NETNOX_RETURN_SUCCESS ||
+                   netnox_ssh_payload_read_u32(payload,len,&off,&amount) != NETNOX_RETURN_SUCCESS ||
+                   channel != s->local_channel_id || amount > UINT32_MAX - s->remote_window_size) break;
+                s->remote_window_size += amount;
+            } else if(payload[0] == NETNOX_SSH_MSG_CHANNEL_EOF) {
+                if(!s->want_pty) shutdown(child_fd, SHUT_WR);
+                else { const uint8_t eot = 4u; (void)srv_write_child(child_fd,&eot,1u,1); }
+            } else if(payload[0] == NETNOX_SSH_MSG_CHANNEL_CLOSE || payload[0] == NETNOX_SSH_MSG_DISCONNECT) break;
+            else if(payload[0] == NETNOX_SSH_MSG_CHANNEL_REQUEST && s->want_pty) {
+                const uint8_t *req; uint32_t req_len; uint32_t cols, rows, width, height;
+                if(netnox_ssh_payload_read_u32(payload,len,&off,&channel) != NETNOX_RETURN_SUCCESS ||
+                   netnox_ssh_payload_read_string_view(payload,len,&off,&req,&req_len) != NETNOX_RETURN_SUCCESS ||
+                   channel != s->local_channel_id || off >= len) break;
+                off++; /* want-reply */
+                if(req_len == 13u && memcmp(req,"window-change",13u) == 0 &&
+                   netnox_ssh_payload_read_u32(payload,len,&off,&cols) == NETNOX_RETURN_SUCCESS &&
+                   netnox_ssh_payload_read_u32(payload,len,&off,&rows) == NETNOX_RETURN_SUCCESS &&
+                   netnox_ssh_payload_read_u32(payload,len,&off,&width) == NETNOX_RETURN_SUCCESS &&
+                   netnox_ssh_payload_read_u32(payload,len,&off,&height) == NETNOX_RETURN_SUCCESS) {
+                    ws.ws_col=(unsigned short)cols; ws.ws_row=(unsigned short)rows;
+                    ws.ws_xpixel=(unsigned short)width; ws.ws_ypixel=(unsigned short)height;
+                    (void)ioctl(child_fd,TIOCSWINSZ,&ws);
+                }
             }
-            pos += chunk;
-            rem -= chunk;
+        }
+        if(nfd == 2 && (pf[1].revents & (POLLIN | POLLHUP))) {
+            uint32_t cap = sizeof(output);
+            ssize_t n;
+            if(cap > s->remote_window_size) cap = s->remote_window_size;
+            if(s->remote_max_packet_size > 64u && cap > s->remote_max_packet_size - 64u) cap = s->remote_max_packet_size - 64u;
+            if(cap == 0u) continue;
+            n = read(child_fd, output, cap);
+            if(n > 0) { if(srv_send_channel_data_chunk(s,output,(uint32_t)n) != NETNOX_RETURN_SUCCESS) break; }
+            else if(n == 0 || (n < 0 && errno == EIO)) output_eof = 1;
+            else if(errno != EINTR && errno != EAGAIN) break;
+        }
+        if(!child_reaped && waitpid(pid,&status,WNOHANG) == pid) child_reaped = 1;
+        if(output_eof && child_reaped) {
+            uint32_t exit_code = WIFEXITED(status) ? (uint32_t)WEXITSTATUS(status) : 128u + (uint32_t)WTERMSIG(status);
+            (void)srv_send_exit_status(s, exit_code);
+            (void)srv_send_channel_eof(s); (void)srv_send_channel_close(s);
+            s->channel_open = 0u; close(child_fd); return NETNOX_RETURN_SUCCESS;
         }
     }
-    (void)close(fd[0]);
-    (void)waitpid(pid, NULL, 0);
-    (void)srv_send_channel_eof(s);
-    (void)srv_send_channel_close(s);
+    close(child_fd);
+    if(!child_reaped) {
+        kill(-pid,SIGTERM);
+        for(int tries=0; tries<20 && waitpid(pid,&status,WNOHANG)==0; tries++) usleep(50000);
+        if(waitpid(pid,&status,WNOHANG)==0) { kill(-pid,SIGKILL); waitpid(pid,&status,0); }
+    }
     s->channel_open = 0u;
-    return NETNOX_RETURN_SUCCESS;
+    return NETNOX_RETURN_FAILED;
 }
 #else
 static netnox_return_t srv_run_exec_win32(netnox_ssh_server_t * s, const char * cmd)
@@ -1471,37 +1582,59 @@ static netnox_return_t srv_handle_userauth_request(netnox_ssh_server_t * s,
     if(netnox_ssh_payload_read_string_view(p, plen, &off, &method, &method_len) != NETNOX_RETURN_SUCCESS) {
         return NETNOX_RETURN_FAILED;
     }
-    (void)user;
-    (void)user_len;
     if(service_len != strlen(NETNOX_SSH_SERVICE_CONNECTION) ||
        memcmp(service, NETNOX_SSH_SERVICE_CONNECTION, service_len) != 0) {
         return srv_send_userauth_failure(s, 0);
     }
-    if(method_len == strlen(NETNOX_SSH_AUTH_METHOD_PASSWORD) &&
-       memcmp(method, NETNOX_SSH_AUTH_METHOD_PASSWORD, method_len) == 0) {
-        uint8_t change = 0u;
-        const uint8_t * pw = NULL;
-        uint32_t pw_len = 0u;
-        if(off >= plen) {
-            return NETNOX_RETURN_FAILED;
-        }
-        change = p[off++];
-        (void)change;
-        if(netnox_ssh_payload_read_string_view(p, plen, &off, &pw, &pw_len) != NETNOX_RETURN_SUCCESS) {
-            return NETNOX_RETURN_FAILED;
-        }
-        if(s->allowed_password[0] == '\0') {
+    if(method_len == strlen("publickey") && memcmp(method, "publickey", method_len) == 0) {
+        const uint8_t * alg, * key_blob, * blob_alg, * key, * sig_blob, * sig_alg, * sig;
+        uint32_t alg_len, key_blob_len, blob_alg_len, key_len, sig_blob_len, sig_alg_len, sig_len;
+        uint32_t blob_off = 0u, sig_off = 0u, req_len, signed_len;
+        uint8_t * to_sign;
+        char username[65];
+        int allowed;
+        uint8_t signed_flag;
+        if(user_len == 0u || user_len >= sizeof(username) || memchr(user, 0, user_len) != NULL ||
+           s->publickey_allowed_cb == NULL || off >= plen) return srv_send_userauth_failure(s, 0);
+        signed_flag = p[off++];
+        if(signed_flag > 1u ||
+           netnox_ssh_payload_read_string_view(p, plen, &off, &alg, &alg_len) != NETNOX_RETURN_SUCCESS ||
+           netnox_ssh_payload_read_string_view(p, plen, &off, &key_blob, &key_blob_len) != NETNOX_RETURN_SUCCESS) {
             return srv_send_userauth_failure(s, 0);
         }
-        if(pw_len == strlen(s->allowed_password) && memcmp(pw, s->allowed_password, pw_len) == 0) {
-            s->authenticated = 1u;
-            return srv_send_userauth_success(s);
+        if(alg_len != strlen(NETNOX_SSH_KEYALG_ED25519) ||
+           memcmp(alg, NETNOX_SSH_KEYALG_ED25519, alg_len) != 0 ||
+           netnox_ssh_payload_read_string_view(key_blob, key_blob_len, &blob_off, &blob_alg, &blob_alg_len) != NETNOX_RETURN_SUCCESS ||
+           netnox_ssh_payload_read_string_view(key_blob, key_blob_len, &blob_off, &key, &key_len) != NETNOX_RETURN_SUCCESS ||
+           blob_off != key_blob_len || blob_alg_len != alg_len || memcmp(blob_alg, alg, alg_len) != 0 || key_len != 32u) {
+            return srv_send_userauth_failure(s, 0);
         }
-        return srv_send_userauth_failure(s, 0);
-    }
-    if(method_len == strlen("publickey") && memcmp(method, "publickey", method_len) == 0) {
-        /* Probe or verify: not implemented — RFC 4252 continuation. */
-        return srv_send_userauth_failure(s, 1);
+        req_len = off;
+        memcpy(username, user, user_len); username[user_len] = '\0';
+        if(!s->publickey_allowed_cb(s->publickey_allowed_user_data, username, key)) return srv_send_userauth_failure(s, 0);
+        if(signed_flag == 0u) {
+            if(off != plen) return srv_send_userauth_failure(s, 0);
+            return srv_send_userauth_pk_ok(s, alg, alg_len, key_blob, key_blob_len);
+        }
+        if(netnox_ssh_payload_read_string_view(p, plen, &off, &sig_blob, &sig_blob_len) != NETNOX_RETURN_SUCCESS || off != plen ||
+           netnox_ssh_payload_read_string_view(sig_blob, sig_blob_len, &sig_off, &sig_alg, &sig_alg_len) != NETNOX_RETURN_SUCCESS ||
+           netnox_ssh_payload_read_string_view(sig_blob, sig_blob_len, &sig_off, &sig, &sig_len) != NETNOX_RETURN_SUCCESS ||
+           sig_off != sig_blob_len || sig_alg_len != alg_len || memcmp(sig_alg, alg, alg_len) != 0 || sig_len != 64u) {
+            return srv_send_userauth_failure(s, 0);
+        }
+        signed_len = 4u + s->session_id_len + req_len;
+        to_sign = (uint8_t *)malloc(signed_len);
+        if(to_sign == NULL) return NETNOX_RETURN_FAILED;
+        netnox_ssh_write_u32_be(to_sign, s->session_id_len);
+        memcpy(to_sign + 4u, s->session_id, s->session_id_len);
+        memcpy(to_sign + 4u + s->session_id_len, p, req_len);
+        allowed = noxtls_ed25519_verify(key, to_sign, signed_len, sig) == NOXTLS_RETURN_SUCCESS;
+        free(to_sign);
+        if(!allowed) return srv_send_userauth_failure(s, 0);
+        memcpy(s->authenticated_user, username, user_len + 1u);
+        s->authenticated = 1u;
+        s->connection_service_ready = 1u;
+        return srv_send_userauth_success(s);
     }
     return srv_send_userauth_failure(s, 0);
 }
@@ -1551,6 +1684,7 @@ netnox_return_t netnox_ssh_server_init(netnox_ssh_server_t * server)
         return NETNOX_RETURN_BAD_PARAM;
     }
     memset(server, 0, sizeof(*server));
+    server->transport_fd = -1;
     server->rekey_threshold_bytes = (uint64_t)256 * 1024u * 1024u;
     return netnox_ssh_copy_string(server->server_ident, (uint16_t)sizeof(server->server_ident), NETNOX_SSH_DEFAULT_SERVER_IDENT);
 }
@@ -1595,19 +1729,21 @@ netnox_return_t netnox_ssh_server_generate_host_ed25519_key(netnox_ssh_server_t 
     if(server == NULL) {
         return NETNOX_RETURN_BAD_PARAM;
     }
-    if(noxtls_ed25519_generate_key(server->host_ed25519_sk, server->host_ed25519_pk) != NOXTLS_RETURN_SUCCESS) {
+    if(netnox_ssh_fill_random(server->host_ed25519_sk, sizeof(server->host_ed25519_sk)) != NETNOX_RETURN_SUCCESS ||
+       noxtls_ed25519_public_key(server->host_ed25519_sk, server->host_ed25519_pk) != NOXTLS_RETURN_SUCCESS) {
         return NETNOX_RETURN_FAILED;
     }
     server->host_key_ready = 1u;
     return NETNOX_RETURN_SUCCESS;
 }
 
-netnox_return_t netnox_ssh_server_set_allowed_password(netnox_ssh_server_t * server, const char * password)
+void netnox_ssh_server_set_publickey_callback(netnox_ssh_server_t * server,
+                                             int (*callback)(void *, const char *, const uint8_t [32]),
+                                             void * user_data)
 {
-    if(server == NULL || password == NULL) {
-        return NETNOX_RETURN_BAD_PARAM;
-    }
-    return netnox_ssh_copy_string(server->allowed_password, (uint16_t)sizeof(server->allowed_password), password);
+    if(server == NULL) return;
+    server->publickey_allowed_cb = callback;
+    server->publickey_allowed_user_data = user_data;
 }
 
 void netnox_ssh_server_reset(netnox_ssh_server_t * server)
@@ -1621,6 +1757,12 @@ void netnox_ssh_server_reset(netnox_ssh_server_t * server)
     server->userauth_service_ready = 0u;
     server->connection_service_ready = 0u;
     server->authenticated = 0u;
+    server->authenticated_user[0] = '\0';
+    server->auth_attempts = 0u;
+    server->session_started = 0u;
+    server->handshake_deadline_ms = 0u;
+    server->packet_deadline_ms = 0u;
+    server->send_deadline_ms = 0u;
     server->channel_open = 0u;
     server->key_exchange_complete = 0u;
     server->send_seq = 0u;
@@ -1638,6 +1780,7 @@ netnox_return_t netnox_ssh_server_serve_one(netnox_ssh_server_t * s)
     if(s == NULL || s->send_cb == NULL || s->recv_cb == NULL) {
         return NETNOX_RETURN_BAD_PARAM;
     }
+    s->handshake_deadline_ms = srv_now_ms() + 30000u;
     if(srv_handshake_to_encrypted(s) != NETNOX_RETURN_SUCCESS) {
         SRVDBG("handshake failed");
         return NETNOX_RETURN_FAILED;
@@ -1645,8 +1788,10 @@ netnox_return_t netnox_ssh_server_serve_one(netnox_ssh_server_t * s)
 
     for(;;) {
         if(srv_recv_packet(s, payload, (uint32_t)sizeof(payload), &payload_len) != NETNOX_RETURN_SUCCESS) {
+            SRVDBG("receive packet failed");
             break;
         }
+        SRVDBG("received packet %u", (unsigned)(payload_len ? payload[0] : 0u));
         if(payload_len == 0u) {
             continue;
         }
@@ -1654,7 +1799,8 @@ netnox_return_t netnox_ssh_server_serve_one(netnox_ssh_server_t * s)
            (s->encrypted_bytes_sent >= s->rekey_threshold_bytes ||
             s->encrypted_bytes_recv >= s->rekey_threshold_bytes)) {
             /* Full mid-session rekey not implemented; counters reserved for RFC 4253 §9. */
-            SRVDBG("rekey threshold reached (not implemented)");
+            SRVDBG("rekey threshold reached; closing connection");
+            return NETNOX_RETURN_FAILED;
         }
         switch(payload[0]) {
         case NETNOX_SSH_MSG_DISCONNECT:
@@ -1711,6 +1857,7 @@ netnox_return_t netnox_ssh_server_serve_one(netnox_ssh_server_t * s)
             if(s->userauth_service_ready == 0u) {
                 return NETNOX_RETURN_FAILED;
             }
+            if(s->authenticated || ++s->auth_attempts > 6u) return NETNOX_RETURN_FAILED;
             if(srv_handle_userauth_request(s, payload, payload_len) != NETNOX_RETURN_SUCCESS) {
                 return NETNOX_RETURN_FAILED;
             }
@@ -1739,6 +1886,7 @@ netnox_return_t netnox_ssh_server_serve_one(netnox_ssh_server_t * s)
             }
             if(typ_len == strlen(NETNOX_SSH_CHANNEL_TYPE_SESSION) &&
                memcmp(typ, NETNOX_SSH_CHANNEL_TYPE_SESSION, typ_len) == 0) {
+                if(s->channel_open || client_max_pkt < 128u) return NETNOX_RETURN_FAILED;
                 s->remote_window_size = client_init_win;
                 s->remote_max_packet_size = (client_max_pkt != 0u) ? client_max_pkt : NETNOX_SSH_CHANNEL_MAX_PACKET_SIZE;
                 if(srv_send_channel_open_confirmation(s, sender) != NETNOX_RETURN_SUCCESS) {
@@ -1771,6 +1919,24 @@ netnox_return_t netnox_ssh_server_serve_one(netnox_ssh_server_t * s)
                 return NETNOX_RETURN_FAILED;
             }
             want_reply = payload[off++];
+            if(req_len == 7u && memcmp(req, "pty-req", 7u) == 0) {
+                const uint8_t *term, *modes; uint32_t term_len, modes_len;
+                uint32_t cols,rows,width,height;
+                if(s->want_pty ||
+                   netnox_ssh_payload_read_string_view(payload,payload_len,&off,&term,&term_len) != NETNOX_RETURN_SUCCESS ||
+                   term_len >= sizeof(s->term) || memchr(term,0,term_len) ||
+                   netnox_ssh_payload_read_u32(payload,payload_len,&off,&cols) != NETNOX_RETURN_SUCCESS ||
+                   netnox_ssh_payload_read_u32(payload,payload_len,&off,&rows) != NETNOX_RETURN_SUCCESS ||
+                   netnox_ssh_payload_read_u32(payload,payload_len,&off,&width) != NETNOX_RETURN_SUCCESS ||
+                   netnox_ssh_payload_read_u32(payload,payload_len,&off,&height) != NETNOX_RETURN_SUCCESS ||
+                   netnox_ssh_payload_read_string_view(payload,payload_len,&off,&modes,&modes_len) != NETNOX_RETURN_SUCCESS ||
+                   off != payload_len) { if(want_reply) (void)srv_send_channel_failure(s); continue; }
+                memcpy(s->term,term,term_len); s->term[term_len]='\0';
+                s->pty_cols=cols; s->pty_rows=rows; s->pty_width=width; s->pty_height=height;
+                s->want_pty=1u;
+                if(want_reply && srv_send_channel_success(s) != NETNOX_RETURN_SUCCESS) return NETNOX_RETURN_FAILED;
+                continue;
+            }
             if(req_len == strlen(NETNOX_SSH_CHANNEL_REQ_EXEC) && memcmp(req, NETNOX_SSH_CHANNEL_REQ_EXEC, req_len) == 0) {
                 const uint8_t * cmd = NULL;
                 uint32_t cmd_len = 0u;
@@ -1781,7 +1947,7 @@ netnox_return_t netnox_ssh_server_serve_one(netnox_ssh_server_t * s)
                     }
                     continue;
                 }
-                if(cmd_len > NETNOX_SSH_MAX_COMMAND_LEN) {
+                if(cmd_len > NETNOX_SSH_MAX_COMMAND_LEN || memchr(cmd,0,cmd_len) || off != payload_len) {
                     if(want_reply != 0u) {
                         (void)srv_send_channel_failure(s);
                     }
@@ -1795,7 +1961,7 @@ netnox_return_t netnox_ssh_server_serve_one(netnox_ssh_server_t * s)
                     }
                 }
 #ifndef _WIN32
-                if(srv_run_exec_unix(s, cmdbuf) != NETNOX_RETURN_SUCCESS) {
+                if(srv_run_session_unix(s, cmdbuf, 0) != NETNOX_RETURN_SUCCESS) {
                     return NETNOX_RETURN_FAILED;
                 }
 #else
@@ -1806,9 +1972,13 @@ netnox_return_t netnox_ssh_server_serve_one(netnox_ssh_server_t * s)
                 continue;
             }
             if(req_len == strlen(NETNOX_SSH_CHANNEL_REQ_SHELL) && memcmp(req, NETNOX_SSH_CHANNEL_REQ_SHELL, req_len) == 0) {
-                if(want_reply != 0u) {
-                    (void)srv_send_channel_failure(s);
-                }
+                if(off != payload_len) { if(want_reply) (void)srv_send_channel_failure(s); continue; }
+#ifndef _WIN32
+                if(want_reply && srv_send_channel_success(s) != NETNOX_RETURN_SUCCESS) return NETNOX_RETURN_FAILED;
+                if(srv_run_session_unix(s, NULL, 1) != NETNOX_RETURN_SUCCESS) return NETNOX_RETURN_FAILED;
+#else
+                if(want_reply) (void)srv_send_channel_failure(s);
+#endif
                 continue;
             }
             if(req_len == strlen(NETNOX_SSH_CHANNEL_REQ_SUBSYSTEM) &&

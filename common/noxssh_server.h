@@ -27,6 +27,7 @@ typedef struct netnox_ssh_server
     netnox_ssh_transport_send_t send_cb;
     netnox_ssh_transport_recv_t recv_cb;
     void * io_user_data;
+    int transport_fd; /* POSIX poll descriptor; -1 when unavailable. */
 
     char client_ident[NETNOX_SSH_MAX_IDENT_LEN + 1u];
     char server_ident[NETNOX_SSH_MAX_IDENT_LEN + 1u];
@@ -35,8 +36,18 @@ typedef struct netnox_ssh_server
     uint8_t host_ed25519_pk[32];
     uint8_t host_key_ready;
 
-    /** Plain password accepted for any username (demo / lab use). Empty = no password auth. */
-    char allowed_password[NETNOX_SSH_MAX_PASSWORD_LEN + 1u];
+    /** The daemon checks the OS account and authorized_keys before signature verification. */
+    int (*publickey_allowed_cb)(void *, const char *, const uint8_t [32]);
+    void * publickey_allowed_user_data;
+    char authenticated_user[65];
+    uint8_t auth_attempts;
+    uint8_t session_started;
+    uint64_t handshake_deadline_ms;
+    uint64_t packet_deadline_ms;
+    uint64_t send_deadline_ms;
+    uint8_t want_pty;
+    char term[65];
+    uint32_t pty_cols, pty_rows, pty_width, pty_height;
 
     uint8_t connected;
     uint8_t kexinit_exchanged;
@@ -92,15 +103,16 @@ extern netnox_return_t netnox_ssh_server_set_identification(netnox_ssh_server_t 
 extern netnox_return_t netnox_ssh_server_set_host_ed25519_seed(netnox_ssh_server_t * server,
                                                                const uint8_t secret_seed[32]);
 extern netnox_return_t netnox_ssh_server_generate_host_ed25519_key(netnox_ssh_server_t * server);
-extern netnox_return_t netnox_ssh_server_set_allowed_password(netnox_ssh_server_t * server,
-                                                              const char * password);
+extern void netnox_ssh_server_set_publickey_callback(netnox_ssh_server_t * server,
+                                                     int (*callback)(void *, const char *, const uint8_t [32]),
+                                                     void * user_data);
 
 /**
  * @brief Run full handshake and one interactive session (auth, channel, exec/shell requests).
  *
- * Blocks until the peer disconnects or a fatal protocol error. Exec requests run a
- * one-shot subprocess (stdout only bridged to the channel). Shell and SFTP subsystem
- * requests are rejected unless extended by platform adapters.
+ * Blocks until the peer disconnects or a fatal protocol error. On Linux,
+ * session channels support exec and shell with optional PTY. SFTP and port
+ * forwarding are not implemented.
  */
 extern netnox_return_t netnox_ssh_server_serve_one(netnox_ssh_server_t * server);
 

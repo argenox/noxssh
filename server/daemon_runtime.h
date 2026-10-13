@@ -21,7 +21,6 @@ extern "C" {
  */
 int noxsshd_listen_loop(const char * bind_host,
                         uint16_t port,
-                        const char * password,
                         const uint8_t host_ed25519_seed[32]);
 
 #ifdef __cplusplus
