@@ -39,3 +39,20 @@ and `exit-status`. It permits four concurrent connections. Idle sessions
 close after 30 minutes, and connections close at the 256 MiB rekey limit
 until in-session rekey is implemented. It does not offer SFTP, forwarding,
 password authentication, or every SSH terminal-mode control.
+
+## KC705 qualification status
+
+The `04d265b` server binary ran on the KC705 RV64 Linux system over UART
+controlled **loopback** `127.0.0.1:2222`. Remote exec (`id`, `uname`), PTY,
+an 11-second quiet command returning status 9, invalid-user rejection, and
+wrong-key rejection passed. The host seed was stored on SD with owner root
+and mode `0600`; its public-key fingerprint was
+`SHA256:1Cb2ywW9q2npFNJLYnYhWWgCRALJVdY5Pj1WiD33SbM`. The operator
+reported cleanup status 0, removal of the temporary client keys and PC
+authorization line, and daemon shutdown. The UART evidence is at
+`E:/MPUNoxV_build_artifacts/ethernet_20261012/noxssh-loopback-04d265b.log`.
+
+Source commit `1ef8774` adds `--check-user` and
+`--print-host-public-key` above that tested server version. Those commands
+passed Linux x86/ARM CI; they have not yet been exercised on the KC705.
+An RJ45 network connection to the server has not yet been tested.
