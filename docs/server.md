@@ -148,3 +148,56 @@ existing trusted-host/public-key SSH policy and require exit 0 plus the
 exact marker; also check the output-EOF case returns 9 rather than 255.
 The root-owned updater must not resume from an ambiguous timeout without
 its separate checkpoint/card-state review.
+
+### Fast PTY close correction (source candidate)
+
+The longer keepalive CI smoke exposed an older close-order bug on the fast
+Linux host: after the PTY child completed, the outer loop received a queued
+stdin `CHANNEL_EOF` and immediately returned, closing TCP before the client
+finished its CLOSE/DISCONNECT exchange. The log ended at packet96 and
+OpenSSH reported `client_loop: send disconnect: Broken pipe`, exit255.
+The daemon's180-second timeout had not expired. This failure is not ignored.
+
+[RFC4254 section5.3](https://www.rfc-editor.org/rfc/rfc4254#section-5.3)
+defines EOF as a half-close and requires a reciprocal CLOSE unless already
+sent. [OpenSSH9.5](https://github.com/openssh/openssh-portable/blob/V_9_5_P1/clientloop.c#L1526-L1536)
+sends a final transport DISCONNECT and treats a failed send as fatal.
+The correction validates EOF/CLOSE framing and recipient, keeps EOF from
+terminating the connection, acknowledges CLOSE exactly once, and preserves
+the transport briefly for the final client packets. Successful child
+completion now also requires successful exit-status, EOF and CLOSE sends.
+An active client's intentional CLOSE still ends its child session and
+receives the required CLOSE reply, without manufacturing a child exit code.
+
+The post-close read wait uses a fixed10-second absolute deadline that late
+EOF, duplicate CLOSE, IGNORE or keepalive packets cannot extend. No new
+channel opens while that completed connection drains. It ends promptly on
+client DISCONNECT/hangup or expiry; there is no added unconditional sleep.
+The existing packet reader checks its10-second deadline before each receive
+callback; the POSIX daemon configures each blocking callback with a10-second
+socket timeout. A callback entered just before the packet deadline can still
+wait another10 seconds. Therefore the bound is the10-second first-byte poll
+plus up to roughly20 seconds of packet receipt, excluding crypto processing;
+it is **not a hard10-second whole-drain deadline**. This bound assumes the
+daemon's socket timeout was installed and does not apply to arbitrary blocking
+caller-supplied transport callbacks. No authentication, keys or SSH keepalive
+policy changes are part of this correction. The unused Windows one-shot
+server retains its original EOF/CLOSE path.
+
+```sh
+python3 -B scripts/test_channel_close.py --fixture-parent <private-scratch>
+```
+
+The native fixture compiles the actual channel-end, completion and outer
+dispatch blocks plus clock/poll helpers with simulated transport. It checks
+EOF alone keeps the connection open; EOF/CLOSE/DISCONNECT ordering;
+reply-once and send failures; framing/channel identity; fixed deadlines,
+readable-with-hangup, interruption/errors; and exit-status9/EOF/CLOSE order.
+It is not actual Unix/fork/PTY or encrypted SSH integration. The Linux smoke
+retains the original PTY check and adds20 fast-close repetitions plus a PTY
+returning9. All markers must occur as standalone output lines, so an echoed
+input command cannot satisfy the check; any exit255 remains a failure. Native/full Linux builds,
+CI and root-owned physical retests must qualify this successor separately
+from the prior keepalive binary. Where VM sudo is unavailable, use the
+unprivileged native fixtures/build/CTest and root's authorized existing-account
+temporary-daemon tests; no new account or credential change is required.
