@@ -24,6 +24,8 @@ cleanup() {
   rm -rf -- "$KEYDIR"
 }
 trap cleanup EXIT
+python3 -B "$ROOT/scripts/test_session_keepalive.py" --fixture-parent "$KEYDIR"
+python3 -B "$ROOT/scripts/test_channel_close.py" --fixture-parent "$KEYDIR"
 ssh-keygen -q -t ed25519 -N '' -f "$KEYDIR/id"
 echo "ci_smoke_sshd: account setup $(date -u +%FT%TZ)"
 sudo useradd -m -U -s /bin/sh "$USER_NAME"
@@ -53,6 +55,18 @@ SSH_OPTS=(-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o 
 echo "ci_smoke_sshd: OpenSSH exec $(date -u +%FT%TZ)"
 OUT="$(ssh "${SSH_OPTS[@]}" "$USER_NAME@127.0.0.1" 'printf ci_exec_ok')"
 [[ "$OUT" == 'ci_exec_ok' ]]
+echo "ci_smoke_sshd: quiet live-output child with ServerAlive probes $(date -u +%FT%TZ)"
+OUT="$(ssh "${SSH_OPTS[@]}" -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
+  "$USER_NAME@127.0.0.1" 'sleep 45; printf ci_quiet_keepalive_ok')"
+[[ "$OUT" == 'ci_quiet_keepalive_ok' ]]
+echo "ci_smoke_sshd: quiet output-EOF child with ServerAlive probes $(date -u +%FT%TZ)"
+if ssh "${SSH_OPTS[@]}" -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
+  "$USER_NAME@127.0.0.1" 'exec 0<&- 1>&- 2>&-; sleep 45; exit 9' > /dev/null 2>"$KEYDIR/keepalive.err"; then
+  echo 'quiet keepalive child returned success instead of status 9' >&2; exit 1
+else
+  rc=$?
+  if ((rc != 9)); then cat "$KEYDIR/keepalive.err" >&2; echo "quiet keepalive child returned status $rc instead of 9" >&2; exit 1; fi
+fi
 echo "ci_smoke_sshd: quiet child after output EOF $(date -u +%FT%TZ)"
 if ssh "${SSH_OPTS[@]}" "$USER_NAME@127.0.0.1" 'exec 0<&- 1>&- 2>&-; sleep 11; exit 9' > /dev/null 2>"$KEYDIR/quiet.err"; then
   echo 'quiet child returned success instead of status 9' >&2; exit 1
@@ -61,8 +75,21 @@ else
   if ((rc != 9)); then cat "$KEYDIR/quiet.err" >&2; echo "quiet child returned status $rc instead of 9" >&2; exit 1; fi
 fi
 echo "ci_smoke_sshd: OpenSSH PTY $(date -u +%FT%TZ)"
-OUT="$(printf 'printf ci_shell_ok; exit\n' | ssh -tt "${SSH_OPTS[@]}" "$USER_NAME@127.0.0.1")"
-[[ "$OUT" == *ci_shell_ok* ]]
+OUT="$(printf 'printf "\\nci_shell_ok\\n"; exit\n' | ssh -tt "${SSH_OPTS[@]}" "$USER_NAME@127.0.0.1")"
+printf '%s\n' "$OUT" | tr -d '\r' | grep -Fxq 'ci_shell_ok'
+echo "ci_smoke_sshd: repeated fast OpenSSH PTY close $(date -u +%FT%TZ)"
+for attempt in {1..20}; do
+  OUT="$(printf 'printf "\\nci_fast_shell_ok\\n"; exit\n' | ssh -tt "${SSH_OPTS[@]}" "$USER_NAME@127.0.0.1")"
+  printf '%s\n' "$OUT" | tr -d '\r' | grep -Fxq 'ci_fast_shell_ok'
+done
+echo "ci_smoke_sshd: fast OpenSSH PTY nonzero exit $(date -u +%FT%TZ)"
+if OUT="$(printf 'printf "\\nci_shell_status\\n"; exit 9\n' | ssh -tt "${SSH_OPTS[@]}" "$USER_NAME@127.0.0.1")"; then
+  echo 'PTY returned success instead of status9' >&2; exit 1
+else
+  rc=$?
+  [[ "$rc" -eq 9 ]] || { echo "PTY returned status$rc instead of9" >&2; exit 1; }
+  printf '%s\n' "$OUT" | tr -d '\r' | grep -Fxq 'ci_shell_status'
+fi
 if ssh "${SSH_OPTS[@]}" "no_such_noxssh_user@127.0.0.1" 'printf bad' >/dev/null 2>&1; then
   echo 'invalid account authenticated' >&2; exit 1
 fi
