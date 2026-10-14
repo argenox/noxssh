@@ -101,3 +101,50 @@ Evidence under `E:/MPUNoxV_build_artifacts/ethernet_qualification_20261013`:
 RX busy/buffer drops were recorded. These tests prove working SSH over
 physical Ethernet, not line-rate, zero-drop operation, complete link-loss
 recovery, power-cycle persistence or autonomous FPGA flash configuration.
+
+### Quiet exec keepalive correction (source candidate)
+
+The Unix exec/PTY session has its own receive loop. Source through `2e294de`
+answered unsupported global requests in the outer connection loop but
+dropped them inside a running session. OpenSSH sends a global
+`keepalive@openssh.com` request with a requested reply and counts missing
+replies toward its `ServerAliveCountMax` timeout. A failure reply is valid
+liveness evidence and does not grant the unsupported operation. See the
+[OpenSSH 9.5 client implementation](https://github.com/openssh/openssh-portable/blob/V_9_5_P1/clientloop.c#L444-L483).
+
+The source fix uses one validated global-request handler in both loops.
+It sends no reply for want-reply zero and `SSH_MSG_REQUEST_FAILURE` for a
+nonzero flag. Truncated headers, missing boolean and overflowing string
+lengths fail closed; transport send failures propagate. Request-specific
+arguments for unsupported requests remain opaque, and forwarding stays
+unsupported. No authentication, credential, host seed, crypto or client
+keepalive setting changes are part of this correction. The correction is
+for the Unix server, not the unused Windows one-shot `_popen` implementation.
+
+Offline test:
+
+```sh
+python3 -B scripts/test_session_keepalive.py --fixture-parent <private-scratch>
+```
+
+This compiles the actual parser and both actual dispatch blocks with
+`-Wall -Wextra -Werror`, using a simulated send transport. It checks repeated
+quiet-session probes, want-reply zero/one/nonzero, unsupported request
+arguments, send failure, and malformed/truncated/overflow requests. It
+does not establish encrypted transport, a Unix child or RV64 execution.
+
+Root must compile the full Linux server and run the existing isolated-account
+`scripts/ci_smoke_sshd.sh`. That smoke now includes a quiet 45-second command
+with stdout still open and a quiet 45-second output-EOF child returning 9,
+both with `ServerAliveInterval=10` and `ServerAliveCountMax=3`. The former
+11-second smoke without keepalive probes did not cover this failure.
+
+On 2026-10-14, the board operator reported a read-only
+`sleep 45; printf QUIET_COMMAND_COMPLETED` reproducer exiting 255 after
+45.391 seconds with no stdout under those same keepalive settings. This is
+pre-fix reproduction, not validation of a new binary. After source and
+binary qualification, root should repeat that exact command through the
+existing trusted-host/public-key SSH policy and require exit 0 plus the
+exact marker; also check the output-EOF case returns 9 rather than 255.
+The root-owned updater must not resume from an ambiguous timeout without
+its separate checkpoint/card-state review.

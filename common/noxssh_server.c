@@ -1245,6 +1245,26 @@ static netnox_return_t srv_send_global_request_failure(netnox_ssh_server_t * s)
     return srv_send_packet(s, p, 1u);
 }
 
+/* Unsupported global requests still need a reply when requested. In
+ * particular, OpenSSH ServerAlive probes run while exec/shell owns the
+ * receive loop; REQUEST_FAILURE is a valid liveness reply, not permission
+ * to enable forwarding or another unsupported operation. */
+static netnox_return_t srv_handle_global_request(netnox_ssh_server_t *s,
+                                                const uint8_t *payload,
+                                                uint32_t payload_len)
+{
+    uint32_t off = 1u, request_len;
+    if(s == NULL || payload == NULL || payload_len < 6u ||
+       payload[0] != NETNOX_SSH_MSG_GLOBAL_REQUEST) return NETNOX_RETURN_BAD_PARAM;
+    /* Subtract before comparing: an adversarial u32 string length must not
+     * wrap an offset and manufacture an in-bounds want-reply byte. */
+    if(netnox_ssh_payload_read_u32(payload,payload_len,&off,&request_len) != NETNOX_RETURN_SUCCESS ||
+       request_len == 0u || request_len >= payload_len - off) return NETNOX_RETURN_FAILED;
+    off += request_len;
+    if(payload[off] != 0u) return srv_send_global_request_failure(s);
+    return NETNOX_RETURN_SUCCESS;
+}
+
 static netnox_return_t srv_send_channel_open_confirmation(netnox_ssh_server_t * s,
                                                         uint32_t client_sender_channel)
 {
@@ -1469,7 +1489,9 @@ static netnox_return_t srv_run_session_unix(netnox_ssh_server_t *s, const char *
             uint32_t off = 1u, channel, amount;
             const uint8_t *data; uint32_t data_len;
             if(srv_recv_packet(s, payload, sizeof(payload), &len) != NETNOX_RETURN_SUCCESS || !len) break;
-            if(payload[0] == NETNOX_SSH_MSG_CHANNEL_DATA) {
+            if(payload[0] == NETNOX_SSH_MSG_GLOBAL_REQUEST) {
+                if(srv_handle_global_request(s,payload,len) != NETNOX_RETURN_SUCCESS) break;
+            } else if(payload[0] == NETNOX_SSH_MSG_CHANNEL_DATA) {
                 if(netnox_ssh_payload_read_u32(payload,len,&off,&channel) != NETNOX_RETURN_SUCCESS || channel != s->local_channel_id ||
                    netnox_ssh_payload_read_string_view(payload,len,&off,&data,&data_len) != NETNOX_RETURN_SUCCESS ||
                    off != len || data_len > s->local_window_size || srv_write_child(child_fd,data,data_len,s->want_pty)) break;
@@ -1818,23 +1840,8 @@ netnox_return_t netnox_ssh_server_serve_one(netnox_ssh_server_t * s)
         case NETNOX_SSH_MSG_EXT_INFO:
             continue;
         case NETNOX_SSH_MSG_GLOBAL_REQUEST: {
-            uint32_t off = 1u;
-            const uint8_t * req = NULL;
-            uint32_t req_len = 0u;
-            uint8_t want = 0u;
-            if(payload_len < 3u) {
-                continue;
-            }
-            if(netnox_ssh_payload_read_string_view(payload, payload_len, &off, &req, &req_len) != NETNOX_RETURN_SUCCESS) {
-                continue;
-            }
-            if(off >= payload_len) {
-                continue;
-            }
-            want = payload[off];
-            if(want != 0u) {
-                (void)srv_send_global_request_failure(s);
-            }
+            if(srv_handle_global_request(s,payload,payload_len) != NETNOX_RETURN_SUCCESS)
+                return NETNOX_RETURN_FAILED;
             continue;
         }
         case NETNOX_SSH_MSG_SERVICE_REQUEST: {
